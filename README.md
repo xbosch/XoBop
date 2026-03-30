@@ -71,7 +71,13 @@ Defaults:
 
 ```text
 xobops-test/
-├── XoBop.py                 # Main runtime
+├── XoBop.py                 # Main entrypoint/app wiring
+├── xobop/
+│   ├── router.py            # Unified action parser/classifier
+│   ├── state.py             # Runtime state store (pending actions, last results)
+│   ├── intents.py           # Intent extraction utilities (email fields, refs)
+│   ├── emailer.py           # SMTP email send helper
+│   └── capabilities_fs.py   # Filesystem capabilities (e.g., count entries)
 ├── run_test.sh              # Launcher
 ├── .env                     # Secrets (ignored)
 ├── .env.example             # Template

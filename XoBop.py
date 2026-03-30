@@ -33,10 +33,6 @@ import sqlite3
 import time
 import uuid
 from collections import Counter
-from email.message import EmailMessage
-import mimetypes
-import smtplib
-import ssl
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
@@ -63,6 +59,20 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+
+from xobop.emailer import smtp_send_email
+from xobop.intents import (
+    extract_email_body,
+    extract_git_dir,
+    extract_recipient_email,
+    is_email_intent,
+    is_email_status_intent,
+    refers_to_last_attachment,
+    wants_attachment,
+)
+from xobop.router import classify
+from xobop.state import STATE
+from xobop.capabilities_fs import count_entries
 
 # =============================================================================
 # Logging
@@ -1033,10 +1043,6 @@ async def _run_shell_async(command: str, cwd: str, timeout: int, raw: bool) -> t
 # =============================================================================
 
 history_by_chat: dict[int, list[dict[str, str]]] = {}
-last_exec_by_chat: dict[int, str] = {}
-last_attachment_by_chat: dict[int, str] = {}
-pending_email_by_chat: dict[int, dict[str, str]] = {}
-last_email_status_by_chat: dict[int, str] = {}
 
 
 def _load_recent_history(chat_id: int, limit: int = HISTORY_LOAD_LIMIT) -> list[dict[str, str]]:
@@ -2197,7 +2203,7 @@ async def cmd_exec(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not command:
         await _reply(update, "Use: `/exec <command>`")
         return
-    last_exec_by_chat[chat_id] = command
+    STATE.last_exec_by_chat[chat_id] = command
     await update.message.chat.send_action(ChatAction.TYPING)
     try:
         result = await _call_skill(chat_id, update.message.text, _get_mode(), "run_shell", {"command": command})
@@ -2433,119 +2439,7 @@ Schedule: cron syntax or natural language like every day at 9am
 """)
 
 
-def _is_direct_shell_intent(text: str) -> bool:
-    return bool(re.match(r"^(git|python3|sqlite3|ls|pwd|whoami|cat|cp|mv|mkdir|rm|find|grep|sed|awk|ps|top|du|df|systemctl|journalctl)\b", text, re.I))
-
-
-def _is_execute_last_intent(text: str) -> bool:
-    t = text.strip().lower()
-    return t in {"do it", "run it", "execute", "execute it", "yes do it", "please do it", "force"}
-
-
-def _is_git_commit_push_intent(text: str) -> bool:
-    t = text.strip().lower()
-    return t in {
-        "add, commit and push",
-        "add commit and push",
-        "add commit push",
-        "commit and push",
-        "git add commit push",
-    }
-
-
-def _is_cron_list_intent(text: str) -> bool:
-    t = text.strip().lower()
-    cron_tokens = ["cron", "schedule", "scheduled", "tasks", "jobs"]
-    question_tokens = ["what", "show", "list", "again", "which"]
-    if any(a in t for a in ["/cronlist", "cronlist"]):
-        return True
-    if "cron" in t and any(q in t for q in question_tokens):
-        return True
-    if "scheduled" in t and "job" in t:
-        return True
-    if "cron tasks" in t or "cron jobs" in t:
-        return True
-    return any(c in t for c in cron_tokens) and any(q in t for q in question_tokens)
-
-
-def _extract_git_dir(cmd: str) -> Optional[str]:
-    m = re.search(r"\bgit\s+-C\s+(\S+)", cmd)
-    if m:
-        return m.group(1)
-    return None
-
-
-def _refers_to_last_attachment(text: str) -> bool:
-    t = text.strip().lower()
-    keys = ["use this", "that picture", "this picture", "this photo", "the picture", "the photo", "attach it", "attachment", "image"]
-    return any(k in t for k in keys)
-
-
-def _is_email_intent(text: str) -> bool:
-    t = text.strip().lower()
-    return ("send" in t) and ("email" in t or "mail" in t)
-
-
-def _is_email_status_intent(text: str) -> bool:
-    t = text.strip().lower()
-    return "did you send" in t or "was it sent" in t or "email sent" in t
-
-
-def _extract_recipient_email(text: str) -> Optional[str]:
-    t = text.strip().lower()
-    m = re.search(r"([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})", text)
-    if m:
-        return m.group(1)
-    if "wife" in t or "neri" in t:
-        return "neri1982@gmail.com"
-    return None
-
-
-def _extract_email_body(text: str) -> str:
-    m = re.search(r"\bsaying\b\s+(.*)$", text, re.I)
-    if m and m.group(1).strip():
-        return m.group(1).strip()
-    m2 = re.search(r"\bthat\b\s+(.*)$", text, re.I)
-    if m2 and m2.group(1).strip():
-        return m2.group(1).strip()
-    return "I will be late."
-
-
-def _wants_attachment(text: str) -> bool:
-    t = text.lower()
-    return any(k in t for k in ["attach", "attachment", "photo", "picture", "image"])
-
-
-def _smtp_send_email(to_addr: str, subject: str, body: str, attachment_path: Optional[str] = None) -> str:
-    gmail_user = os.getenv("GMAIL_EMAIL") or os.getenv("GMAIL_USER")
-    gmail_app = os.getenv("GMAIL_APP_PASSWORD")
-    if not gmail_user or not gmail_app:
-        raise RuntimeError("Missing GMAIL_EMAIL/GMAIL_APP_PASSWORD in .env")
-
-    msg = EmailMessage()
-    msg["From"] = gmail_user
-    msg["To"] = to_addr
-    msg["Subject"] = subject
-    msg.set_content(body)
-
-    if attachment_path:
-        p = Path(attachment_path)
-        if not p.exists():
-            raise RuntimeError(f"Attachment not found: {p}")
-        ctype, _ = mimetypes.guess_type(str(p))
-        if not ctype:
-            ctype = "application/octet-stream"
-        maintype, subtype = ctype.split("/", 1)
-        with p.open("rb") as f:
-            msg.add_attachment(f.read(), maintype=maintype, subtype=subtype, filename=p.name)
-
-    with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as s:
-        s.starttls(context=ssl.create_default_context())
-        s.login(gmail_user, gmail_app)
-        s.send_message(msg)
-    if attachment_path:
-        return f"EMAIL_SENT {to_addr} {Path(attachment_path).name}"
-    return f"EMAIL_SENT {to_addr}"
+# intent and email helpers moved to xobop/intents.py and xobop/emailer.py
 
 
 async def handle_media_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2575,23 +2469,25 @@ async def handle_media_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
         inbox.mkdir(parents=True, exist_ok=True)
         local_path = inbox / f"chat{chat_id}_{ts}{suffix}"
         await tg_file.download_to_drive(custom_path=str(local_path))
-        last_attachment_by_chat[chat_id] = str(local_path)
+        STATE.last_attachment_by_chat[chat_id] = str(local_path)
 
         # If we were waiting for an attachment to send an email, complete it now.
-        if chat_id in pending_email_by_chat:
-            pending = pending_email_by_chat.pop(chat_id)
+        if chat_id in STATE.pending_action_by_chat:
+            pending = STATE.pending_action_by_chat.pop(chat_id)
             if pending.get("action") == "send_email":
                 try:
-                    sent = _smtp_send_email(
+                    sent = smtp_send_email(
+                        os.getenv("GMAIL_EMAIL") or os.getenv("GMAIL_USER") or "",
+                        os.getenv("GMAIL_APP_PASSWORD") or "",
                         pending["to"],
                         pending["subject"],
                         pending["body"],
                         str(local_path),
                     )
-                    last_email_status_by_chat[chat_id] = sent
+                    STATE.last_email_status_by_chat[chat_id] = sent
                     await _reply(update, f"Attachment stored: {local_path}\n{sent}")
                 except Exception as exc:
-                    last_email_status_by_chat[chat_id] = f"EMAIL_FAILED {str(exc)[:180]}"
+                    STATE.last_email_status_by_chat[chat_id] = f"EMAIL_FAILED {str(exc)[:180]}"
                     await _reply(update, f"Attachment stored: {local_path}\n⚠️ Email send failed: {str(exc)[:180]}")
                 return
 
@@ -2607,32 +2503,32 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     text = (update.message.text or "").strip()
     chat_id = update.effective_chat.id
 
-    if _refers_to_last_attachment(text) and chat_id in last_attachment_by_chat:
-        text = f"{text}\n\nUse this local attachment path: {last_attachment_by_chat[chat_id]}"
+    if refers_to_last_attachment(text) and chat_id in STATE.last_attachment_by_chat:
+        text = f"{text}\n\nUse this local attachment path: {STATE.last_attachment_by_chat[chat_id]}"
 
     # If waiting for attachment, avoid LLM drift on helper text like "this is the photo".
-    if chat_id in pending_email_by_chat and _refers_to_last_attachment(text) and chat_id not in last_attachment_by_chat:
+    if chat_id in STATE.pending_action_by_chat and refers_to_last_attachment(text) and chat_id not in STATE.last_attachment_by_chat:
         await _reply(update, "Got it — please send the actual photo/file attachment now.")
         return
 
     # Deterministic email workflow (generalized, not wife-specific).
-    if _is_email_status_intent(text):
-        status = last_email_status_by_chat.get(chat_id)
+    if is_email_status_intent(text):
+        status = STATE.last_email_status_by_chat.get(chat_id)
         await _reply(update, status if status else "Not sent yet.")
         return
 
-    if _is_email_intent(text):
-        to_addr = _extract_recipient_email(text)
+    if is_email_intent(text):
+        to_addr = extract_recipient_email(text)
         if not to_addr:
             await _reply(update, "Please provide recipient email (or say wife/neri).")
             return
 
-        body = _extract_email_body(text)
+        body = extract_email_body(text)
         subject = "Message from Xavi"
-        needs_attachment = _wants_attachment(text)
+        needs_attachment = wants_attachment(text)
 
-        if needs_attachment and chat_id not in last_attachment_by_chat:
-            pending_email_by_chat[chat_id] = {
+        if needs_attachment and chat_id not in STATE.last_attachment_by_chat:
+            STATE.pending_action_by_chat[chat_id] = {
                 "action": "send_email",
                 "to": to_addr,
                 "subject": subject,
@@ -2642,12 +2538,19 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             return
 
         try:
-            attachment = last_attachment_by_chat.get(chat_id) if needs_attachment else None
-            sent = _smtp_send_email(to_addr, subject, body, attachment)
-            last_email_status_by_chat[chat_id] = sent
+            attachment = STATE.last_attachment_by_chat.get(chat_id) if needs_attachment else None
+            sent = smtp_send_email(
+                os.getenv("GMAIL_EMAIL") or os.getenv("GMAIL_USER") or "",
+                os.getenv("GMAIL_APP_PASSWORD") or "",
+                to_addr,
+                subject,
+                body,
+                attachment,
+            )
+            STATE.last_email_status_by_chat[chat_id] = sent
             await _reply(update, sent)
         except Exception as exc:
-            last_email_status_by_chat[chat_id] = f"EMAIL_FAILED {str(exc)[:180]}"
+            STATE.last_email_status_by_chat[chat_id] = f"EMAIL_FAILED {str(exc)[:180]}"
             await _reply(update, f"⚠️ Email send failed: {str(exc)[:180]}")
         return
 
@@ -2659,7 +2562,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         if not cmd:
             await _reply(update, "Use: `/exec <command>`")
             return
-        last_exec_by_chat[chat_id] = cmd
+        STATE.last_exec_by_chat[chat_id] = cmd
         await update.message.chat.send_action(ChatAction.TYPING)
         try:
             result = await _call_skill(chat_id, text, _get_mode(), "run_shell", {"command": cmd})
@@ -2681,17 +2584,27 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         await cmd_cronruns(update, ctx)
         return
 
-    # Deterministic cron listing intent (authoritative DB result, no LLM guessing).
-    if _is_cron_list_intent(text):
+    intent = classify(text)
+
+    if intent["name"] == "cron_list":
         await _reply(update, _list_cron_jobs())
         return
 
-    # Intent shortcut: "add, commit and push" based on last git context.
-    if _is_git_commit_push_intent(text) and chat_id in last_exec_by_chat:
-        prev = last_exec_by_chat[chat_id]
-        git_dir = _extract_git_dir(prev) or os.getcwd()
+    if intent["name"] == "download_count":
+        await update.message.chat.send_action(ChatAction.TYPING)
+        try:
+            n = count_entries('/home/xavi/Downloads')
+            await _reply(update, f"You have {n} files in Downloads.")
+        except Exception as exc:
+            log.exception("download-count intent failed")
+            await _reply(update, f"⚠️ Error: {str(exc)[:200]}")
+        return
+
+    if intent["name"] == "git_commit_push" and chat_id in STATE.last_exec_by_chat:
+        prev = STATE.last_exec_by_chat[chat_id]
+        git_dir = extract_git_dir(prev) or os.getcwd()
         cmd = f"git -C {git_dir} add -A && git -C {git_dir} commit -m \"Update via XoBop\" && git -C {git_dir} push"
-        last_exec_by_chat[chat_id] = cmd
+        STATE.last_exec_by_chat[chat_id] = cmd
         await update.message.chat.send_action(ChatAction.TYPING)
         try:
             result = await _call_skill(chat_id, text + " force", _get_mode(), "run_shell", {"command": cmd})
@@ -2701,9 +2614,8 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             await _reply(update, f"⚠️ Error: {str(exc)[:200]}")
         return
 
-    # Natural-language confirmation for last executable command.
-    if _is_execute_last_intent(text) and chat_id in last_exec_by_chat:
-        cmd = last_exec_by_chat[chat_id]
+    if intent["name"] == "execute_last" and chat_id in STATE.last_exec_by_chat:
+        cmd = STATE.last_exec_by_chat[chat_id]
         await update.message.chat.send_action(ChatAction.TYPING)
         try:
             result = await _call_skill(chat_id, text + " force", _get_mode(), "run_shell", {"command": cmd})
@@ -2713,10 +2625,8 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             await _reply(update, f"⚠️ Error: {str(exc)[:200]}")
         return
 
-    # Convenience fallback: allow direct shell-like one-liners (e.g., "git -C ... status")
-    # without forcing users to type /exec every time.
-    if _is_direct_shell_intent(text):
-        last_exec_by_chat[chat_id] = text
+    if intent["name"] == "direct_shell":
+        STATE.last_exec_by_chat[chat_id] = text
         await update.message.chat.send_action(ChatAction.TYPING)
         try:
             result = await _call_skill(chat_id, text, _get_mode(), "run_shell", {"command": text})
@@ -2726,11 +2636,19 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             await _reply(update, f"⚠️ Error: {str(exc)[:200]}")
         return
 
-    # Guardrail: block embedded command-like text from free-text LLM path,
-    # but allow normal slash commands to flow via handlers.
-    if not text.startswith("/") and re.search(r"(^|\s):?\s*/\w+", text):
-        await _reply(update, "Command-like text detected. Send the command alone on one line (starting with /).")
+    # Safety fallback for direct git command if router misses.
+    if text.lower().startswith("git "):
+        STATE.last_exec_by_chat[chat_id] = text
+        await update.message.chat.send_action(ChatAction.TYPING)
+        try:
+            result = await _call_skill(chat_id, text, _get_mode(), "run_shell", {"command": text})
+            await _reply(update, result)
+        except Exception as exc:
+            log.exception("Direct git fallback error")
+            await _reply(update, f"⚠️ Error: {str(exc)[:200]}")
         return
+
+    # NOTE: embedded slash-command guard removed due false positives on normal text.
 
     await update.message.chat.send_action(ChatAction.TYPING)
     try:
