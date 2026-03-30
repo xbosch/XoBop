@@ -33,6 +33,10 @@ import sqlite3
 import time
 import uuid
 from collections import Counter
+from email.message import EmailMessage
+import mimetypes
+import smtplib
+import ssl
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
@@ -1030,6 +1034,9 @@ async def _run_shell_async(command: str, cwd: str, timeout: int, raw: bool) -> t
 
 history_by_chat: dict[int, list[dict[str, str]]] = {}
 last_exec_by_chat: dict[int, str] = {}
+last_attachment_by_chat: dict[int, str] = {}
+pending_email_by_chat: dict[int, dict[str, str]] = {}
+last_email_status_by_chat: dict[int, str] = {}
 
 
 def _load_recent_history(chat_id: int, limit: int = HISTORY_LOAD_LIMIT) -> list[dict[str, str]]:
@@ -2468,11 +2475,181 @@ def _extract_git_dir(cmd: str) -> Optional[str]:
     return None
 
 
+def _refers_to_last_attachment(text: str) -> bool:
+    t = text.strip().lower()
+    keys = ["use this", "that picture", "this picture", "this photo", "the picture", "the photo", "attach it", "attachment", "image"]
+    return any(k in t for k in keys)
+
+
+def _is_email_intent(text: str) -> bool:
+    t = text.strip().lower()
+    return ("send" in t) and ("email" in t or "mail" in t)
+
+
+def _is_email_status_intent(text: str) -> bool:
+    t = text.strip().lower()
+    return "did you send" in t or "was it sent" in t or "email sent" in t
+
+
+def _extract_recipient_email(text: str) -> Optional[str]:
+    t = text.strip().lower()
+    m = re.search(r"([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})", text)
+    if m:
+        return m.group(1)
+    if "wife" in t or "neri" in t:
+        return "neri1982@gmail.com"
+    return None
+
+
+def _extract_email_body(text: str) -> str:
+    m = re.search(r"\bsaying\b\s+(.*)$", text, re.I)
+    if m and m.group(1).strip():
+        return m.group(1).strip()
+    m2 = re.search(r"\bthat\b\s+(.*)$", text, re.I)
+    if m2 and m2.group(1).strip():
+        return m2.group(1).strip()
+    return "I will be late."
+
+
+def _wants_attachment(text: str) -> bool:
+    t = text.lower()
+    return any(k in t for k in ["attach", "attachment", "photo", "picture", "image"])
+
+
+def _smtp_send_email(to_addr: str, subject: str, body: str, attachment_path: Optional[str] = None) -> str:
+    gmail_user = os.getenv("GMAIL_EMAIL") or os.getenv("GMAIL_USER")
+    gmail_app = os.getenv("GMAIL_APP_PASSWORD")
+    if not gmail_user or not gmail_app:
+        raise RuntimeError("Missing GMAIL_EMAIL/GMAIL_APP_PASSWORD in .env")
+
+    msg = EmailMessage()
+    msg["From"] = gmail_user
+    msg["To"] = to_addr
+    msg["Subject"] = subject
+    msg.set_content(body)
+
+    if attachment_path:
+        p = Path(attachment_path)
+        if not p.exists():
+            raise RuntimeError(f"Attachment not found: {p}")
+        ctype, _ = mimetypes.guess_type(str(p))
+        if not ctype:
+            ctype = "application/octet-stream"
+        maintype, subtype = ctype.split("/", 1)
+        with p.open("rb") as f:
+            msg.add_attachment(f.read(), maintype=maintype, subtype=subtype, filename=p.name)
+
+    with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as s:
+        s.starttls(context=ssl.create_default_context())
+        s.login(gmail_user, gmail_app)
+        s.send_message(msg)
+    if attachment_path:
+        return f"EMAIL_SENT {to_addr} {Path(attachment_path).name}"
+    return f"EMAIL_SENT {to_addr}"
+
+
+async def handle_media_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _owner_only(update):
+        return
+    msg = update.message
+    if not msg:
+        return
+    chat_id = update.effective_chat.id
+
+    media_obj = None
+    suffix = ""
+    if msg.photo:
+        media_obj = msg.photo[-1]
+        suffix = ".jpg"
+    elif msg.document:
+        media_obj = msg.document
+        name = msg.document.file_name or ""
+        suffix = Path(name).suffix or ""
+    if not media_obj:
+        return
+
+    try:
+        tg_file = await media_obj.get_file()
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        inbox = Path(ARTIFACT_DIR) / "inbox"
+        inbox.mkdir(parents=True, exist_ok=True)
+        local_path = inbox / f"chat{chat_id}_{ts}{suffix}"
+        await tg_file.download_to_drive(custom_path=str(local_path))
+        last_attachment_by_chat[chat_id] = str(local_path)
+
+        # If we were waiting for an attachment to send an email, complete it now.
+        if chat_id in pending_email_by_chat:
+            pending = pending_email_by_chat.pop(chat_id)
+            if pending.get("action") == "send_email":
+                try:
+                    sent = _smtp_send_email(
+                        pending["to"],
+                        pending["subject"],
+                        pending["body"],
+                        str(local_path),
+                    )
+                    last_email_status_by_chat[chat_id] = sent
+                    await _reply(update, f"Attachment stored: {local_path}\n{sent}")
+                except Exception as exc:
+                    last_email_status_by_chat[chat_id] = f"EMAIL_FAILED {str(exc)[:180]}"
+                    await _reply(update, f"Attachment stored: {local_path}\n⚠️ Email send failed: {str(exc)[:180]}")
+                return
+
+        await _reply(update, f"Attachment stored: {local_path}")
+    except Exception as exc:
+        log.exception("Failed to download attachment")
+        await _reply(update, f"⚠️ Could not store attachment: {str(exc)[:200]}")
+
+
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _owner_only(update):
         return
     text = (update.message.text or "").strip()
     chat_id = update.effective_chat.id
+
+    if _refers_to_last_attachment(text) and chat_id in last_attachment_by_chat:
+        text = f"{text}\n\nUse this local attachment path: {last_attachment_by_chat[chat_id]}"
+
+    # If waiting for attachment, avoid LLM drift on helper text like "this is the photo".
+    if chat_id in pending_email_by_chat and _refers_to_last_attachment(text) and chat_id not in last_attachment_by_chat:
+        await _reply(update, "Got it — please send the actual photo/file attachment now.")
+        return
+
+    # Deterministic email workflow (generalized, not wife-specific).
+    if _is_email_status_intent(text):
+        status = last_email_status_by_chat.get(chat_id)
+        await _reply(update, status if status else "Not sent yet.")
+        return
+
+    if _is_email_intent(text):
+        to_addr = _extract_recipient_email(text)
+        if not to_addr:
+            await _reply(update, "Please provide recipient email (or say wife/neri).")
+            return
+
+        body = _extract_email_body(text)
+        subject = "Message from Xavi"
+        needs_attachment = _wants_attachment(text)
+
+        if needs_attachment and chat_id not in last_attachment_by_chat:
+            pending_email_by_chat[chat_id] = {
+                "action": "send_email",
+                "to": to_addr,
+                "subject": subject,
+                "body": body,
+            }
+            await _reply(update, f"Ready to send to {to_addr}. Please attach the file/photo now.")
+            return
+
+        try:
+            attachment = last_attachment_by_chat.get(chat_id) if needs_attachment else None
+            sent = _smtp_send_email(to_addr, subject, body, attachment)
+            last_email_status_by_chat[chat_id] = sent
+            await _reply(update, sent)
+        except Exception as exc:
+            last_email_status_by_chat[chat_id] = f"EMAIL_FAILED {str(exc)[:180]}"
+            await _reply(update, f"⚠️ Email send failed: {str(exc)[:180]}")
+        return
 
     # Fallback: if Telegram command routing fails, still honor core slash commands.
     # (Useful when bot_command entities are missing or malformed.)
@@ -2641,6 +2818,7 @@ def main() -> None:
     app.add_handler(CommandHandler("cronoff", cmd_cronoff))
     app.add_handler(CommandHandler("cronrun", cmd_cronrun))
     app.add_handler(CommandHandler("cronruns", cmd_cronruns))
+    app.add_handler(MessageHandler((filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, handle_media_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     loop = asyncio.new_event_loop()
