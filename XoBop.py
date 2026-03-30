@@ -2568,8 +2568,9 @@ async def cmd_promptreject(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
 def _run_checkup_sync() -> str:
     import subprocess
     checks = []
+    code_path = Path(__file__).resolve()
     # Pin to project venv explicitly (based on XoBop.py location) to avoid cwd/interpreter drift.
-    venv_python = (Path(__file__).resolve().parent / '.venv' / 'bin' / 'python').resolve()
+    venv_python = (code_path.parent / '.venv' / 'bin' / 'python').resolve()
     checks.append(("venv_python", venv_python.exists()))
     req = Path('requirements.txt').resolve()
     checks.append(("requirements_txt", req.exists()))
@@ -2599,7 +2600,15 @@ def _run_checkup_sync() -> str:
     checks.append(("pip_check", dep_ok))
 
     bad = [name for name, ok in checks if not ok]
+    git_rev = "unknown"
+    try:
+        git_rev = subprocess.check_output(["git", "-C", str(code_path.parent), "rev-parse", "--short", "HEAD"], text=True).strip() or "unknown"
+    except Exception:
+        pass
+
     lines = [f"• {name}: {'✅' if ok else '❌'}" for name, ok in checks]
+    lines.append(f"• code_path: {code_path}")
+    lines.append(f"• git_rev: {git_rev}")
     lines.append(f"• venv_python_path: {venv_python}")
     lines.append(f"• pip_check_note: {dep_note}")
     if bad:
