@@ -2392,14 +2392,32 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     if not _owner_only(update):
         return
     text = (update.message.text or "").strip()
+    chat_id = update.effective_chat.id
 
-    # Guardrail: if a command-like message reaches free-text handler,
-    # don't let the LLM fabricate command success.
-    if re.search(r"(^|\s):?\s*/\w+", text):
+    # Fallback: if Telegram command routing fails, still honor /exec directly.
+    # (Useful when bot_command entities are missing or malformed.)
+    if text.lower().startswith("/exec "):
+        await cmd_exec(update, ctx)
+        return
+
+    # Convenience fallback: allow direct shell-like one-liners (e.g., "git -C ... status")
+    # without forcing users to type /exec every time.
+    if re.match(r"^(git|python3|sqlite3|ls|pwd|whoami|cat|cp|mv|mkdir)\b", text, re.I):
+        await update.message.chat.send_action(ChatAction.TYPING)
+        try:
+            result = await _call_skill(chat_id, text, _get_mode(), "run_shell", {"command": text})
+            await _reply(update, result)
+        except Exception as exc:
+            log.exception("Direct shell fallback error")
+            await _reply(update, f"⚠️ Error: {str(exc)[:200]}")
+        return
+
+    # Guardrail: block embedded command-like text from free-text LLM path,
+    # but allow normal slash commands to flow via handlers.
+    if not text.startswith("/") and re.search(r"(^|\s):?\s*/\w+", text):
         await _reply(update, "Command-like text detected. Send the command alone on one line (starting with /).")
         return
 
-    chat_id = update.effective_chat.id
     await update.message.chat.send_action(ChatAction.TYPING)
     try:
         result = await _run_agent(chat_id, text)
