@@ -51,8 +51,10 @@ def main() -> int:
     print("Send each command in Telegram when prompted.\n")
 
     for i, (cmd, must) in enumerate(TESTS, start=1):
-        input(f"[{i}/{len(TESTS)}] Send now in Telegram: {cmd}\nPress Enter after sending...")
         before = db_max_id()
+        print(f"\n[{i}/{len(TESTS)}] Send this in Telegram:")
+        print(f"  {cmd}")
+        input("After sending it, press Enter here to verify...")
         try:
             reply = wait_reply(before)
         except TimeoutError as e:
