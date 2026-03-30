@@ -28,6 +28,8 @@ The goal is operational reliability over chatty behavior.
 - Skill/tool execution with policy checks
 - DB-backed cron scheduler (APScheduler + `cron_jobs`/`cron_runs`)
 - Online SQLite backup capability (`db_backup` cron skill, uses SQLite backup API)
+- Pending action hydration across restarts (session snapshot in `sessions` table)
+- Artifact watcher that notifies owner when new files appear in `artifacts/`
 
 ---
 

@@ -372,6 +372,12 @@ def _init_db() -> None:
                 weight INTEGER NOT NULL DEFAULT 1
             );
             CREATE INDEX IF NOT EXISTS idx_rate_events_bucket_ts ON rate_events(bucket, timestamp);
+
+            CREATE TABLE IF NOT EXISTS sessions (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_ts DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
         """)
     _bootstrap_default_skills()
     _bootstrap_default_policies()
@@ -516,6 +522,25 @@ def _set_setting(key: str, value: str) -> None:
 
 def _get_mode() -> str:
     return _get_setting("mode", "strict") or "strict"
+
+
+def _save_session_state(key: str, obj: dict) -> None:
+    with get_db() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO sessions (key,value,updated_ts) VALUES (?,?,CURRENT_TIMESTAMP)",
+            (key, json.dumps(obj)),
+        )
+
+
+def _load_session_state(key: str) -> Optional[dict]:
+    with get_db() as conn:
+        row = conn.execute("SELECT value FROM sessions WHERE key=?", (key,)).fetchone()
+    if not row:
+        return None
+    try:
+        return json.loads(row["value"])
+    except Exception:
+        return None
 
 
 def _get_policy(key: str, default: str = "") -> str:
@@ -1558,6 +1583,9 @@ def _record_cron_run(name: str, status: str, duration_ms: int, output: str, erro
 
 
 _app: Optional[Any] = None
+_state_task: Optional[asyncio.Task] = None
+_artifact_task: Optional[asyncio.Task] = None
+_seen_artifacts: set[str] = set()
 
 
 async def _run_cron_job(job_name: str) -> None:
@@ -1658,6 +1686,34 @@ def _sync_scheduler(scheduler: AsyncIOScheduler) -> None:
             scheduler.remove_job(job_id)
         except Exception:
             pass
+
+
+async def _state_persist_loop() -> None:
+    while True:
+        try:
+            payload = {"pending_action_by_chat": STATE.pending_action_by_chat}
+            _save_session_state("runtime_state", payload)
+        except Exception as exc:
+            log.warning("State persist failed: %s", exc)
+        await asyncio.sleep(20)
+
+
+async def _artifact_watch_loop() -> None:
+    global _seen_artifacts
+    art = Path(ARTIFACT_DIR)
+    art.mkdir(parents=True, exist_ok=True)
+    _seen_artifacts = {str(p) for p in art.rglob("*") if p.is_file()}
+    while True:
+        try:
+            current = {str(p) for p in art.rglob("*") if p.is_file()}
+            new_files = sorted(current - _seen_artifacts)
+            _seen_artifacts = current
+            if new_files and _app is not None:
+                newest = new_files[-1]
+                await _app.bot.send_message(chat_id=OWNER_ID, text=f"🆕 New artifact detected:\n{newest}")
+        except Exception as exc:
+            log.warning("Artifact watcher failed: %s", exc)
+        await asyncio.sleep(30)
 
 
 # =============================================================================
@@ -2482,7 +2538,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 # =============================================================================
 
 async def _post_init(app: Application) -> None:
-    global _app
+    global _app, _state_task, _artifact_task
     _app = app
     scheduler = _build_scheduler()
     app.bot_data["scheduler"] = scheduler
@@ -2490,12 +2546,33 @@ async def _post_init(app: Application) -> None:
     scheduler.start()
     log.info("Scheduler started with %d jobs", len(scheduler.get_jobs()))
 
+    # hydrate pending actions from persisted session state
+    snapshot = _load_session_state("runtime_state") or {}
+    pending = snapshot.get("pending_action_by_chat", {})
+    if isinstance(pending, dict):
+        STATE.pending_action_by_chat = {int(k): v for k, v in pending.items()}
+        if STATE.pending_action_by_chat:
+            try:
+                await _app.bot.send_message(chat_id=OWNER_ID, text="Resuming pending action state from previous session.")
+            except Exception:
+                pass
+
+    _state_task = asyncio.create_task(_state_persist_loop())
+    _artifact_task = asyncio.create_task(_artifact_watch_loop())
+
 
 async def _post_shutdown(app: Application) -> None:
+    global _state_task, _artifact_task
     scheduler = app.bot_data.get("scheduler")
     if scheduler and scheduler.running:
         scheduler.shutdown(wait=False)
         log.info("Scheduler stopped.")
+
+    for t in (_state_task, _artifact_task):
+        if t and not t.done():
+            t.cancel()
+    _state_task = None
+    _artifact_task = None
 
 
 async def _graceful_shutdown(app: Application) -> None:
