@@ -2507,6 +2507,93 @@ def _health_report() -> str:
     )
 
 
+def _diagnose_report(days: int = 7) -> str:
+    d = max(1, min(days, 30))
+    with get_db() as conn:
+        daily = conn.execute(
+            """
+            SELECT day,events_total,failures,command_unknown,retries_total,median_latency_ms,p95_latency_ms
+            FROM op_signals_daily
+            WHERE day >= date('now', ?)
+            ORDER BY day DESC
+            LIMIT 7
+            """,
+            (f"-{d} day",),
+        ).fetchall()
+        fail_routes = conn.execute(
+            """
+            SELECT COALESCE(route,'') AS route, COUNT(*) AS n
+            FROM op_events
+            WHERE timestamp >= datetime('now', ?)
+              AND status NOT IN ('ok','skipped')
+            GROUP BY COALESCE(route,'')
+            ORDER BY n DESC
+            LIMIT 5
+            """,
+            (f"-{d} day",),
+        ).fetchall()
+        unknown_cmds = conn.execute(
+            """
+            SELECT COALESCE(command,'') AS cmd, COUNT(*) AS n
+            FROM op_events
+            WHERE timestamp >= datetime('now', ?)
+              AND event_type='unknown_command'
+            GROUP BY COALESCE(command,'')
+            ORDER BY n DESC
+            LIMIT 5
+            """,
+            (f"-{d} day",),
+        ).fetchall()
+        since = conn.execute("SELECT MIN(timestamp) AS ts FROM op_events").fetchone()["ts"]
+
+    if not daily and not fail_routes and not unknown_cmds:
+        return "No diagnosis data yet. Run workload and `scripts/build_signals.py` first."
+
+    total_events = sum(int(r["events_total"] or 0) for r in daily)
+    total_fail = sum(int(r["failures"] or 0) for r in daily)
+    total_unknown = sum(int(r["command_unknown"] or 0) for r in daily)
+    fail_rate = (100.0 * total_fail / total_events) if total_events else 0.0
+
+    lines = [
+        f"Diagnosis window: last {d} day(s)",
+        f"Data since: {since or 'n/a'}",
+        f"Events: {total_events} | Failures: {total_fail} ({fail_rate:.1f}%) | Unknown commands: {total_unknown}",
+    ]
+
+    if daily:
+        lines.append("Daily summary:")
+        for r in daily[:5]:
+            lines.append(
+                f"- {r['day']}: events={int(r['events_total'] or 0)} fail={int(r['failures'] or 0)} "
+                f"unk={int(r['command_unknown'] or 0)} p95={float(r['p95_latency_ms'] or 0):.0f}ms"
+            )
+
+    if fail_routes:
+        lines.append("Top failing routes:")
+        for r in fail_routes:
+            route = r["route"] or "(none)"
+            lines.append(f"- {route}: {int(r['n'])}")
+
+    if unknown_cmds:
+        lines.append("Top unknown commands:")
+        for r in unknown_cmds:
+            cmd = r["cmd"] or "(empty)"
+            lines.append(f"- {cmd}: {int(r['n'])}")
+
+    likely = []
+    if total_unknown >= 3:
+        likely.append("Command discoverability issue: high unknown-command volume")
+    if any((r["route"] or "") == "run_shell" for r in fail_routes):
+        likely.append("Shell route instability: investigate policy blocks/path assumptions")
+    if daily and any(float(r["p95_latency_ms"] or 0) > 4000 for r in daily):
+        likely.append("Latency pressure: p95 over 4s in diagnosis window")
+    if likely:
+        lines.append("Likely causes:")
+        lines.extend([f"- {x}" for x in likely])
+
+    return "\n".join(lines)
+
+
 def _top_skills(limit: int = 10) -> str:
     with get_db() as conn:
         rows = conn.execute(
@@ -2927,6 +3014,17 @@ async def cmd_health(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await _reply(update, _health_report())
 
 
+async def cmd_diagnose(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _owner_only(update):
+        return
+    raw = update.message.text.partition(" ")[2].strip()
+    try:
+        days = int(raw) if raw else 7
+    except ValueError:
+        days = 7
+    await _reply(update, _diagnose_report(days))
+
+
 async def cmd_topskills(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if _owner_only(update):
         await _reply(update, _top_skills())
@@ -3273,6 +3371,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 /status — system status
 /health — health summary
 /checkup — dependency/env drift check
+/diagnose [days] — ops diagnosis from instrumentation signals
 /plan goal — create execution manifest
 /go — execute staged manifest
 /topskills — most used skills
@@ -3357,6 +3456,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             cmd_status=lambda u: cmd_status(u, ctx),
             cmd_health=lambda u: cmd_health(u, ctx),
             cmd_checkup=lambda u: cmd_checkup(u, ctx),
+            cmd_diagnose=lambda u: cmd_diagnose(u, ctx),
             cmd_panicstatus=lambda u: cmd_panicstatus(u, ctx),
             cmd_paniclock=lambda u: cmd_paniclock(u, ctx),
             cmd_panicunlock=lambda u: cmd_panicunlock(u, ctx),
@@ -3476,6 +3576,7 @@ def main() -> None:
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("health", cmd_health))
     app.add_handler(CommandHandler("checkup", cmd_checkup))
+    app.add_handler(CommandHandler("diagnose", cmd_diagnose))
     app.add_handler(CommandHandler("plan", cmd_plan))
     app.add_handler(CommandHandler("go", cmd_go))
     app.add_handler(CommandHandler("topskills", cmd_topskills))

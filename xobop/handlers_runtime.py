@@ -84,6 +84,7 @@ async def process_text_message(
     cmd_status,
     cmd_health,
     cmd_checkup,
+    cmd_diagnose,
     cmd_panicstatus,
     cmd_paniclock,
     cmd_panicunlock,
@@ -161,6 +162,10 @@ async def process_text_message(
     if lower.startswith("/checkup"):
         op_event("health_check", chat_id=chat_id, route="cmd_checkup")
         await cmd_checkup(update)
+        return True
+    if lower.startswith("/diagnose"):
+        op_event("route_selected", chat_id=chat_id, route="cmd_diagnose")
+        await cmd_diagnose(update)
         return True
     if lower.startswith("/panicstatus"):
         await cmd_panicstatus(update)
