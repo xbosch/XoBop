@@ -90,6 +90,9 @@ async def process_text_message(
     cmd_improve_simulate,
     cmd_improve_runs,
     cmd_improve_compare,
+    cmd_improve_policy,
+    cmd_improve_promote,
+    cmd_improve_autopromote,
     cmd_panicstatus,
     cmd_paniclock,
     cmd_panicunlock,
@@ -191,6 +194,18 @@ async def process_text_message(
     if lower.startswith("/improve_compare"):
         op_event("route_selected", chat_id=chat_id, route="cmd_improve_compare")
         await cmd_improve_compare(update)
+        return True
+    if lower.startswith("/improve_policy"):
+        op_event("route_selected", chat_id=chat_id, route="cmd_improve_policy")
+        await cmd_improve_policy(update)
+        return True
+    if lower.startswith("/improve_promote"):
+        op_event("route_selected", chat_id=chat_id, route="cmd_improve_promote")
+        await cmd_improve_promote(update)
+        return True
+    if lower.startswith("/improve_autopromote"):
+        op_event("route_selected", chat_id=chat_id, route="cmd_improve_autopromote")
+        await cmd_improve_autopromote(update)
         return True
     if lower.startswith("/panicstatus"):
         await cmd_panicstatus(update)

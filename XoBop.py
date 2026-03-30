@@ -664,6 +664,11 @@ def _overseer_enabled() -> bool:
     return _get_mode() == "overseer"
 
 
+def _get_improve_policy() -> str:
+    p = (_get_setting("improve_policy", "assisted") or "assisted").strip().lower()
+    return p if p in {"manual", "assisted", "auto_low"} else "assisted"
+
+
 def _panic_locked() -> bool:
     return (_get_setting("panic_lock", "0") or "0").strip() == "1"
 
@@ -2884,6 +2889,92 @@ def _impact_compare_sync(proposal_id: int, window_days: int = 7) -> str:
     return "\n".join(lines)
 
 
+def _latest_run_status(proposal_id: int, phase: str) -> Optional[str]:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT status FROM improvement_runs WHERE proposal_id=? AND phase=? ORDER BY id DESC LIMIT 1",
+            (proposal_id, phase),
+        ).fetchone()
+    return row["status"] if row else None
+
+
+def _promote_proposal_sync(proposal_id: int, force: bool = False) -> str:
+    policy = _get_improve_policy()
+    with get_db() as conn:
+        p = conn.execute(
+            "SELECT id,status,risk_level,title FROM improvement_proposals WHERE id=?",
+            (proposal_id,),
+        ).fetchone()
+        if not p:
+            raise ValueError(f"Proposal not found: {proposal_id}")
+
+    if p["status"] in {"promoted", "rejected"}:
+        return f"Proposal #{proposal_id} already {p['status']}."
+
+    risk = (p["risk_level"] or "low").lower()
+    sim = _latest_run_status(proposal_id, "simulation")
+    imp = _latest_run_status(proposal_id, "impact_compare")
+
+    if sim != "ok":
+        return "⛔ Promotion blocked: simulation gate is not PASS. Run /improve_simulate first."
+
+    if policy == "manual" and not force:
+        return "⛔ Policy=manual. Re-run with force for explicit approval."
+
+    if risk == "high" and not force:
+        return "⛔ High-risk proposal requires explicit force approval."
+    if risk == "medium" and policy in {"manual", "assisted"} and not force:
+        return "⛔ Medium-risk proposal requires force under current policy."
+
+    if imp == "error" and not force:
+        return "⛔ Impact comparison indicates regression. Use force only with explicit acceptance."
+
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE improvement_proposals SET status='promoted' WHERE id=?",
+            (proposal_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO improvement_runs(proposal_id,phase,status,before_json,after_json,notes)
+            VALUES(?, 'promotion', 'ok', '{}', '{}', ?)
+            """,
+            (proposal_id, f"policy={policy}; risk={risk}; force={int(force)}"),
+        )
+
+    return f"✅ Proposal #{proposal_id} promoted under policy={policy} risk={risk}."
+
+
+def _auto_promote_low_sync() -> str:
+    policy = _get_improve_policy()
+    if policy != "auto_low":
+        return f"⛔ Auto-promotion disabled by policy={policy}."
+
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id FROM improvement_proposals WHERE status='proposed' AND risk_level='low' ORDER BY id ASC LIMIT 20"
+        ).fetchall()
+
+    promoted = 0
+    blocked = 0
+    for r in rows:
+        pid = int(r["id"])
+        sim = _latest_run_status(pid, "simulation")
+        imp = _latest_run_status(pid, "impact_compare")
+        if sim == "ok" and imp != "error":
+            with get_db() as conn:
+                conn.execute("UPDATE improvement_proposals SET status='promoted' WHERE id=?", (pid,))
+                conn.execute(
+                    "INSERT INTO improvement_runs(proposal_id,phase,status,before_json,after_json,notes) VALUES(?, 'promotion', 'ok', '{}', '{}', 'auto_low')",
+                    (pid,),
+                )
+            promoted += 1
+        else:
+            blocked += 1
+
+    return f"Auto-promotion complete: promoted={promoted} blocked={blocked}"
+
+
 def _top_skills(limit: int = 10) -> str:
     with get_db() as conn:
         rows = conn.execute(
@@ -3400,6 +3491,46 @@ async def cmd_improve_compare(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
     await _reply(update, rep)
 
 
+async def cmd_improve_policy(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _owner_only(update):
+        return
+    raw = update.message.text.partition(" ")[2].strip().lower()
+    if not raw:
+        await _reply(update, f"improve_policy: {_get_improve_policy()}\nUse: `/improve_policy <manual|assisted|auto_low>`")
+        return
+    if raw not in {"manual", "assisted", "auto_low"}:
+        await _reply(update, "Use: `/improve_policy <manual|assisted|auto_low>`")
+        return
+    _set_setting("improve_policy", raw)
+    await _reply(update, f"✅ improve_policy set to: {raw}")
+
+
+async def cmd_improve_promote(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _owner_only(update):
+        return
+    raw = update.message.text.partition(" ")[2].strip().split()
+    if not raw:
+        await _reply(update, "Use: `/improve_promote <proposal_id> [force]`")
+        return
+    try:
+        pid = int(raw[0])
+    except Exception:
+        await _reply(update, "Use: `/improve_promote <proposal_id> [force]`")
+        return
+    force = any(x.lower() == "force" for x in raw[1:])
+    loop = asyncio.get_running_loop()
+    rep = await loop.run_in_executor(None, lambda: _promote_proposal_sync(pid, force))
+    await _reply(update, rep)
+
+
+async def cmd_improve_autopromote(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _owner_only(update):
+        return
+    loop = asyncio.get_running_loop()
+    rep = await loop.run_in_executor(None, _auto_promote_low_sync)
+    await _reply(update, rep)
+
+
 async def cmd_topskills(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if _owner_only(update):
         await _reply(update, _top_skills())
@@ -3752,6 +3883,9 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 /improve_simulate <proposal_id> — run simulation gate for a proposal
 /improve_runs [proposal_id] — list recent simulation runs
 /improve_compare <proposal_id> [window_days] — compare before/after impact
+/improve_policy [manual|assisted|auto_low] — set promotion autonomy policy
+/improve_promote <proposal_id> [force] — promote proposal with risk-policy checks
+/improve_autopromote — auto-promote low-risk proposals (policy=auto_low)
 /plan goal — create execution manifest
 /go — execute staged manifest
 /topskills — most used skills
@@ -3842,6 +3976,9 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             cmd_improve_simulate=lambda u: cmd_improve_simulate(u, ctx),
             cmd_improve_runs=lambda u: cmd_improve_runs(u, ctx),
             cmd_improve_compare=lambda u: cmd_improve_compare(u, ctx),
+            cmd_improve_policy=lambda u: cmd_improve_policy(u, ctx),
+            cmd_improve_promote=lambda u: cmd_improve_promote(u, ctx),
+            cmd_improve_autopromote=lambda u: cmd_improve_autopromote(u, ctx),
             cmd_panicstatus=lambda u: cmd_panicstatus(u, ctx),
             cmd_paniclock=lambda u: cmd_paniclock(u, ctx),
             cmd_panicunlock=lambda u: cmd_panicunlock(u, ctx),
@@ -3967,6 +4104,9 @@ def main() -> None:
     app.add_handler(CommandHandler("improve_simulate", cmd_improve_simulate))
     app.add_handler(CommandHandler("improve_runs", cmd_improve_runs))
     app.add_handler(CommandHandler("improve_compare", cmd_improve_compare))
+    app.add_handler(CommandHandler("improve_policy", cmd_improve_policy))
+    app.add_handler(CommandHandler("improve_promote", cmd_improve_promote))
+    app.add_handler(CommandHandler("improve_autopromote", cmd_improve_autopromote))
     app.add_handler(CommandHandler("plan", cmd_plan))
     app.add_handler(CommandHandler("go", cmd_go))
     app.add_handler(CommandHandler("topskills", cmd_topskills))
