@@ -25,6 +25,10 @@ artifacts/
 backups/
 memory/
 ops-digest/
+outbox/
+*.jpg
+*.jpeg
+*.png
 MEMORY.md
 
 # Local junk / accidental dirs
