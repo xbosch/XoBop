@@ -1995,6 +1995,15 @@ def _owner_only(update: Update) -> bool:
 
 
 async def _reply(update: Update, text: str) -> None:
+    # Persist all command-path assistant replies for observability/tests.
+    try:
+        chat_id = update.effective_chat.id if update and update.effective_chat else 0
+        if chat_id:
+            loop = asyncio.get_running_loop()
+            _fire_and_forget(loop, lambda: _save_message(chat_id, "assistant", text), label="save_reply_msg")
+    except Exception:
+        pass
+
     try:
         await update.message.reply_text(text, parse_mode="Markdown")
     except TelegramError:
