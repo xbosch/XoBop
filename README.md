@@ -1,15 +1,32 @@
 # XoBop
 
-Personal Telegram copilot with memory, skills, and cron automation.
+Owner-scoped Telegram copilot with deterministic command routing, SQLite memory, and DB-backed cron jobs.
+
+## Current status
+
+- ✅ Runtime DB name is `memory.db` (no `_v5` naming in active config/code/docs)
+- ✅ Owner-only command surface
+- ✅ Runtime prompts stored in DB (`strict` / `normal`)
+- ✅ Command routing hardening (`/exec`, direct shell intents, cron list intent)
+- ✅ Interactive smoke verification (`scripts/smoke_watch.py`)
+- ⚠️ Important: do **not** back up a live SQLite DB with plain `cp`
+
+---
 
 ## Features
 
-- Owner-only Telegram bot control
-- Two runtime modes (`strict`, `normal`) with DB-backed runtime prompts
-- Long-term memory in SQLite (`memory_v5.db`) + embeddings
-- Skills/tool execution with policy gates
-- Cron jobs stored in DB and executed by APScheduler
-- Gmail helper workflow scripts (noise filtering + sender triage)
+- Telegram bot with owner gate (`OWNER_ID`)
+- Two runtime modes: `strict`, `normal`
+- Runtime prompt control:
+  - `/promptshow`
+  - `/promptset <mode> <text|reset>`
+- Hybrid memory in SQLite:
+  - chat transcript
+  - semantic memory + vectors
+- Skill/tool execution with policy checks
+- DB-backed cron scheduler (APScheduler + `cron_jobs`/`cron_runs`)
+
+---
 
 ## Requirements
 
@@ -17,7 +34,7 @@ Personal Telegram copilot with memory, skills, and cron automation.
 - Telegram bot token
 - OpenAI API key
 
-## Quick install
+Install:
 
 ```bash
 cd xobops-test
@@ -26,153 +43,156 @@ source .venv/bin/activate
 pip install -U pip
 pip install -r requirements.txt
 cp .env.example .env
-# edit .env and set TELEGRAM_TOKEN + OPENAI_API_KEY + OWNER_ID
+# set TELEGRAM_TOKEN, OPENAI_API_KEY, OWNER_ID
 ./run_test.sh
 ```
 
-## Configuration
+---
 
-Main file: `.env`
+## Configuration (`.env`)
 
 Required:
+
 - `TELEGRAM_TOKEN`
 - `OPENAI_API_KEY`
 - `OWNER_ID`
 
-Important optional:
-- `MODEL` (default: `gpt-4.1-mini`)
-- `EMBEDDING_MODEL` (default: `text-embedding-3-small`)
-- `DEFAULT_MODE` (`strict` or `normal`)
-- `ALLOW_RAW_SHELL` (`0` recommended)
+Defaults:
 
-## Telegram command examples
+- `DB_FILE=memory.db`
+- `MODEL=gpt-4.1-mini`
+- `EMBEDDING_MODEL=text-embedding-3-small`
+- `DEFAULT_MODE=strict`
+- `ALLOW_RAW_SHELL=0`
 
-- `/status`
-- `/mode strict`
-- `/mode normal`
-- `/promptshow`
-- `/promptset normal You are concise and practical.`
-- `/cronlist`
-- `/cronrun <job_name>`
+---
 
-## Notes
-
-- Keep `.env`, database files, and backups out of git.
-- Cron command parsing is strict for JSON payloads; keep `/cronadd ... | {json}` on one line.
-- For production, run under systemd/tmux and rotate backups.
-
-## Project layout
-
-- `XoBop.py` — main bot runtime
-- `run_test.sh` — local launcher
-- `.env.example` — config template
-- `memory_v5.db` — runtime DB (ignored)
-- `artifacts/`, `backups/`, `memory/` — runtime state (ignored)
-
-## Runtime structure (how XoBop works)
+## Project structure
 
 ```text
 xobops-test/
-├── XoBop.py                 # Main Telegram bot runtime (commands, agent loop, cron)
-├── run_test.sh              # Local launcher (loads .env, activates venv, starts bot)
-├── .env                     # Secrets/config (ignored in git)
-├── .env.example             # Safe template for required env vars
-├── requirements.txt         # Python dependencies
-├── memory_v5.db             # Main SQLite state DB (ignored)
-├── memory_v5.db-shm/.wal    # SQLite runtime files (ignored)
-├── artifacts/               # Generated artifacts from tool/skill runs (ignored)
+├── XoBop.py                 # Main runtime
+├── run_test.sh              # Launcher
+├── .env                     # Secrets (ignored)
+├── .env.example             # Template
+├── requirements.txt
+├── memory.db                # Runtime DB (ignored)
+├── memory.db-shm/.wal       # SQLite runtime files (ignored)
+├── scripts/
+│   ├── smoke_watch.py       # Interactive smoke verifier
+│   └── smoke_test.sh        # Wrapper for smoke_watch
+├── artifacts/               # Runtime artifacts (ignored)
 ├── backups/                 # DB backups (ignored)
-└── memory/                  # File-based daily/long notes (ignored)
+└── memory/                  # File memory notes (ignored)
 ```
 
-## Execution flow
+---
 
-1. Telegram message arrives to bot.
-2. Owner check is applied.
-3. Command path:
-   - `/status`, `/mode`, `/promptshow`, `/cron*`, etc. handled directly.
-4. Free-text path:
-   - `_run_agent()` builds prompt + memory block + recent history.
-   - LLM may call skills/tools.
-   - Tool results are appended and finalized into assistant response.
-5. Persistence:
-   - Conversations + memories + cron jobs/runs are stored in `memory_v5.db`.
-6. Scheduler:
-   - APScheduler loads DB cron jobs at startup and executes them on schedule.
+## Database structure (`memory.db`)
 
-## Core loop details
+Primary tables used by runtime:
 
-### 1) Input + routing
-- Telegram updates are received by `python-telegram-bot` handlers.
-- If message starts with a registered command (`/status`, `/cronrun`, etc.), command handlers run.
-- Otherwise message goes to `handle_message()` and enters agent loop.
+- `conversations` — chat transcript (`chat_id`, `role`, `content`, `timestamp`)
+- `memory_items` — semantic memory entries (`text`, `mem_type`, `importance`, `source`, `pinned`, `is_deleted`)
+- `memory_vectors` — embedding vectors linked to `memory_items`
+- `settings` — runtime settings (e.g., active mode)
+- `runtime_prompts` — prompt text per mode (`strict`, `normal`)
+- `global_policies` — safety/limits config
+- `skills` — enabled skill registry + metadata
+- `skill_policies` — per-skill policy overrides
+- `runs` — tool execution logs
+- `tasks` — open/closed task tracking
+- `cron_jobs` — scheduled jobs (`name`, `cron_expr`, `skill_type`, `skill_args`, state)
+- `cron_runs` — cron execution history
+- `rate_events` — rate-limit accounting buckets
 
-### 2) Agent loop (`_run_agent`)
-- Select mode: `strict` or `normal` (from settings table).
-- Fetch runtime prompt from `runtime_prompts` table.
-- Build memory context block from semantic memory retrieval.
-- Build message stack: system prompt + recent chat history + user message.
-- Call LLM.
-- If tool calls are returned:
-  - validate/parse args
-  - execute mapped skill/tool
-  - append tool output
-  - loop again until final assistant answer or max rounds
+Quick schema inspection:
 
-### 3) Memory model
-XoBop uses hybrid memory:
-- **Conversation memory**: `conversations` table (chat transcript)
-- **Semantic memory**: `memory_items` + `memory_vectors`
-- **Settings/policies**: `settings`, `global_policies`, `runtime_prompts`
-- **Tasks**: `tasks`
-- **Cron**: `cron_jobs`, `cron_runs`
+```bash
+python3 - <<'PY'
+import sqlite3
+con=sqlite3.connect('/home/xavi/.openclaw/workspace/xobops-test/memory.db')
+for row in con.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"):
+    print(row[0])
+con.close()
+PY
+```
 
-Memory retrieval combines similarity + recency; important user facts can be pinned.
+---
 
-### 4) Prompt/SOUL/skills relationship
-- **SOUL (behavior identity):** implemented in runtime prompt text (strict/normal modes in DB).
-- **Memory:** provides user/context continuity injected at runtime.
-- **Skills:** executable capabilities exposed to the LLM as tools.
-- **Policy gates:** enforce owner-only control + risk boundaries before side effects.
+## Runtime flow
+
+1. Telegram update arrives
+2. Owner check
+3. Routing:
+   - command handlers (`/status`, `/cron*`, `/prompt*`, etc.)
+   - deterministic intent shortcuts (cron list, direct shell intents)
+   - fallback to `_run_agent()` for general chat/tool loop
+4. Persistence in `memory.db`
+5. Scheduler runs `cron_jobs`, writes `cron_runs`
+
+---
+
+## Commands (core)
+
+- `/status`
+- `/mode strict|normal`
+- `/promptshow`
+- `/promptset strict|normal <text|reset>`
+- `/skills`
+- `/exec <command>`
+- `/cronadd ...`
+- `/cronlist`
+- `/cronrun <name>`
+- `/cronruns <name> [limit]`
+
+---
+
+## Smoke testing
+
+Run:
+
+```bash
+cd /home/xavi/.openclaw/workspace/xobops-test
+./scripts/smoke_test.sh
+```
+
+This launches an interactive verifier and asks you to send test commands in Telegram, then validates replies via DB.
+
+---
+
+## Backup safety (critical)
+
+Do **not** use `cp memory.db ...` while bot is running.
+
+Use SQLite-safe backup methods (`sqlite3 .backup` or Python `sqlite3.Connection.backup`) to avoid corruption.
+
+---
 
 ## Architecture diagram
 
 ```mermaid
-%%{init: {'flowchart': {'useMaxWidth': true, 'nodeSpacing': 24, 'rankSpacing': 28}, 'theme': 'default'}}%%
+%%{init: {'flowchart': {'useMaxWidth': true, 'nodeSpacing': 22, 'rankSpacing': 28}, 'theme': 'default'}}%%
 flowchart LR
-    U[User] --> T[Telegram update]
-    T --> R{Slash command?}
+    U[Owner user] --> T[Telegram update]
+    T --> R{Route type}
 
-    R -- yes --> C[Command handlers]
-    C --> DB[(SQLite DB)]
-    C --> O[Reply]
+    R --> C[Command handlers]
+    R --> D[Deterministic intents]
+    R --> A[_run_agent]
 
-    R -- no --> H[handle_message]
-    H --> A[_run_agent]
-    A --> P[Prompt by mode]
-    A --> M[Memory block]
+    C --> DB[(memory.db)]
+    D --> S[Skill executor]
     A --> L[LLM]
-
-    L --> K{Tool calls?}
-    K -- yes --> S[Skill executor]
+    L --> S
     S --> DB
-    S --> A
-    K -- no --> O
 
-    J[APScheduler] --> Q[cron_jobs]
-    Q --> S
-    S --> X[cron_runs]
-    X --> DB
-```
+    J[APScheduler] --> CJ[cron_jobs]
+    CJ --> S
+    S --> CR[cron_runs]
+    CR --> DB
 
-If your Markdown viewer still clips Mermaid diagrams, switch to this fallback (always fits):
-
-```text
-User -> Telegram update -> [Command?]
-  Yes -> Command handlers -> DB -> Reply
-  No  -> handle_message -> _run_agent -> LLM -> [Tool calls?]
-           Yes -> Skill executor -> DB -> _run_agent
-           No  -> Reply
-
-APScheduler -> cron_jobs -> Skill executor -> cron_runs -> DB
+    C --> O[Reply]
+    D --> O
+    A --> O
 ```

@@ -7,6 +7,5 @@ if [[ ! -x .venv/bin/python ]]; then
   exit 1
 fi
 
-echo "NOTE: smoke_test.py (bot-self-send) is deprecated for owner-flow checks."
 echo "Launching interactive verifier (smoke_watch.py)..."
 exec .venv/bin/python scripts/smoke_watch.py

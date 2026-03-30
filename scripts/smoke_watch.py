@@ -2,7 +2,7 @@
 """Interactive smoke verifier for XoBop.
 
 User sends commands manually in Telegram.
-This script watches memory_v5.db for assistant replies and validates expected tokens.
+This script watches memory.db for assistant replies and validates expected tokens.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-DB_PATH = Path('/home/xavi/.openclaw/workspace/xobops-test/memory_v5.db')
+DB_PATH = Path('/home/xavi/.openclaw/workspace/xobops-test/memory.db')
 CHAT_ID = 5410368885
 
 TESTS = [

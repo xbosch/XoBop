@@ -94,7 +94,7 @@ OWNER_ID = int(_require_env("OWNER_ID"))
 
 MODEL = os.getenv("MODEL", "gpt-4.1-mini")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
-DB_FILE = os.getenv("DB_FILE", "memory_v5.db")
+DB_FILE = os.getenv("DB_FILE", "memory.db")
 DEFAULT_MODE = os.getenv("DEFAULT_MODE", "strict").strip().lower()
 ARTIFACT_DIR = Path(os.getenv("ARTIFACT_DIR", "artifacts")).resolve()
 ALLOWED_WRITE_ROOT = Path(os.getenv("ALLOWED_WRITE_ROOT", os.getcwd())).resolve()
@@ -2432,7 +2432,7 @@ def _is_direct_shell_intent(text: str) -> bool:
 
 def _is_execute_last_intent(text: str) -> bool:
     t = text.strip().lower()
-    return t in {"do it", "run it", "execute", "execute it", "yes do it", "please do it"}
+    return t in {"do it", "run it", "execute", "execute it", "yes do it", "please do it", "force"}
 
 
 def _is_git_commit_push_intent(text: str) -> bool:
@@ -2444,6 +2444,21 @@ def _is_git_commit_push_intent(text: str) -> bool:
         "commit and push",
         "git add commit push",
     }
+
+
+def _is_cron_list_intent(text: str) -> bool:
+    t = text.strip().lower()
+    cron_tokens = ["cron", "schedule", "scheduled", "tasks", "jobs"]
+    question_tokens = ["what", "show", "list", "again", "which"]
+    if any(a in t for a in ["/cronlist", "cronlist"]):
+        return True
+    if "cron" in t and any(q in t for q in question_tokens):
+        return True
+    if "scheduled" in t and "job" in t:
+        return True
+    if "cron tasks" in t or "cron jobs" in t:
+        return True
+    return any(c in t for c in cron_tokens) and any(q in t for q in question_tokens)
 
 
 def _extract_git_dir(cmd: str) -> Optional[str]:
@@ -2459,9 +2474,10 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     text = (update.message.text or "").strip()
     chat_id = update.effective_chat.id
 
-    # Fallback: if Telegram command routing fails, still honor /exec directly.
+    # Fallback: if Telegram command routing fails, still honor core slash commands.
     # (Useful when bot_command entities are missing or malformed.)
-    if text.lower().startswith("/exec "):
+    lower = text.lower()
+    if lower.startswith("/exec "):
         cmd = text[6:].strip()
         if not cmd:
             await _reply(update, "Use: `/exec <command>`")
@@ -2474,6 +2490,23 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         except Exception as exc:
             log.exception("/exec fallback error")
             await _reply(update, f"⚠️ Error: {str(exc)[:200]}")
+        return
+    if lower.startswith("/cronadd "):
+        await cmd_cronadd(update, ctx)
+        return
+    if lower.startswith("/cronlist"):
+        await cmd_cronlist(update, ctx)
+        return
+    if lower.startswith("/cronrun "):
+        await cmd_cronrun(update, ctx)
+        return
+    if lower.startswith("/cronruns "):
+        await cmd_cronruns(update, ctx)
+        return
+
+    # Deterministic cron listing intent (authoritative DB result, no LLM guessing).
+    if _is_cron_list_intent(text):
+        await _reply(update, _list_cron_jobs())
         return
 
     # Intent shortcut: "add, commit and push" based on last git context.

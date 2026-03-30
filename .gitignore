@@ -18,9 +18,9 @@ __pycache__/
 venv/
 
 # Runtime state
-memory_v5.db
-memory_v5.db-shm
-memory_v5.db-wal
+memory.db
+memory.db-shm
+memory.db-wal
 artifacts/
 backups/
 memory/
