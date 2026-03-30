@@ -70,6 +70,9 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()],
 )
 log = logging.getLogger("xavi")
+# Reduce noisy/sensitive transport logs (can leak bot token in URL paths)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.WARNING)
 
 # =============================================================================
 # Configuration
@@ -2423,6 +2426,24 @@ def _is_execute_last_intent(text: str) -> bool:
     return t in {"do it", "run it", "execute", "execute it", "yes do it", "please do it"}
 
 
+def _is_git_commit_push_intent(text: str) -> bool:
+    t = text.strip().lower()
+    return t in {
+        "add, commit and push",
+        "add commit and push",
+        "add commit push",
+        "commit and push",
+        "git add commit push",
+    }
+
+
+def _extract_git_dir(cmd: str) -> Optional[str]:
+    m = re.search(r"\bgit\s+-C\s+(\S+)", cmd)
+    if m:
+        return m.group(1)
+    return None
+
+
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _owner_only(update):
         return
@@ -2443,6 +2464,21 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             await _reply(update, result)
         except Exception as exc:
             log.exception("/exec fallback error")
+            await _reply(update, f"⚠️ Error: {str(exc)[:200]}")
+        return
+
+    # Intent shortcut: "add, commit and push" based on last git context.
+    if _is_git_commit_push_intent(text) and chat_id in last_exec_by_chat:
+        prev = last_exec_by_chat[chat_id]
+        git_dir = _extract_git_dir(prev) or os.getcwd()
+        cmd = f"git -C {git_dir} add -A && git -C {git_dir} commit -m \"Update via XoBop\" && git -C {git_dir} push"
+        last_exec_by_chat[chat_id] = cmd
+        await update.message.chat.send_action(ChatAction.TYPING)
+        try:
+            result = await _call_skill(chat_id, text + " force", _get_mode(), "run_shell", {"command": cmd})
+            await _reply(update, result)
+        except Exception as exc:
+            log.exception("git commit/push intent fallback error")
             await _reply(update, f"⚠️ Error: {str(exc)[:200]}")
         return
 
