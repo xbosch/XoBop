@@ -138,28 +138,41 @@ Memory retrieval combines similarity + recency; important user facts can be pinn
 ## Architecture diagram
 
 ```mermaid
-flowchart TD
-    U[Telegram User] --> T[Telegram Update]
-    T --> R{Command?}
+%%{init: {'flowchart': {'useMaxWidth': true, 'nodeSpacing': 24, 'rankSpacing': 28}, 'theme': 'default'}}%%
+flowchart LR
+    U[User] --> T[Telegram update]
+    T --> R{Slash command?}
 
-    R -- Yes --> C[Command Handlers\n/status /mode /prompt* /cron*]
-    C --> DB[(SQLite memory_v5.db)]
-    C --> O[Bot Reply]
+    R -- yes --> C[Command handlers]
+    C --> DB[(SQLite DB)]
+    C --> O[Reply]
 
-    R -- No --> H[handle_message]
-    H --> A[_run_agent loop]
-    A --> P[Load mode + runtime prompt]
-    A --> M[Build memory block\nsemantic + recency]
-    A --> L[LLM call]
+    R -- no --> H[handle_message]
+    H --> A[_run_agent]
+    A --> P[Prompt by mode]
+    A --> M[Memory block]
+    A --> L[LLM]
 
-    L --> TC{Tool calls?}
-    TC -- Yes --> S[Skill/Tool executor]
+    L --> K{Tool calls?}
+    K -- yes --> S[Skill executor]
     S --> DB
     S --> A
-    TC -- No --> O
+    K -- no --> O
 
-    SCH[APScheduler] --> CJ[cron_jobs]
-    CJ --> S
-    S --> CR[cron_runs]
-    CR --> DB
+    J[APScheduler] --> Q[cron_jobs]
+    Q --> S
+    S --> X[cron_runs]
+    X --> DB
+```
+
+If your Markdown viewer still clips Mermaid diagrams, switch to this fallback (always fits):
+
+```text
+User -> Telegram update -> [Command?]
+  Yes -> Command handlers -> DB -> Reply
+  No  -> handle_message -> _run_agent -> LLM -> [Tool calls?]
+           Yes -> Skill executor -> DB -> _run_agent
+           No  -> Reply
+
+APScheduler -> cron_jobs -> Skill executor -> cron_runs -> DB
 ```
