@@ -112,6 +112,7 @@ EMBEDDING_FALLBACK = os.getenv("EMBEDDING_FALLBACK", "1").strip() == "1"
 FILE_MEMORY_ROOT = Path(os.getenv("FILE_MEMORY_ROOT", str(ALLOWED_WRITE_ROOT))).resolve()
 LONG_MEMORY_FILE = Path(os.getenv("LONG_MEMORY_FILE", str(FILE_MEMORY_ROOT / "MEMORY.md"))).resolve()
 DAILY_MEMORY_DIR = Path(os.getenv("DAILY_MEMORY_DIR", str(FILE_MEMORY_ROOT / "memory"))).resolve()
+SELF_MODS_FILE = Path(os.getenv("SELF_MODS_FILE", str(Path(os.getcwd()) / "config" / "self_mods.json"))).resolve()
 DAILY_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 
 HISTORY_LOAD_LIMIT = 40
@@ -687,6 +688,22 @@ def _get_mode() -> str:
     return _get_setting("mode", "strict") or "strict"
 
 
+def _load_self_mods() -> dict[str, Any]:
+    try:
+        if SELF_MODS_FILE.exists():
+            data = json.loads(SELF_MODS_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {"command_aliases": {}, "exec_retry_limit": 0}
+
+
+def _save_self_mods(data: dict[str, Any]) -> None:
+    SELF_MODS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SELF_MODS_FILE.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+
+
 def _get_command_aliases() -> dict[str, str]:
     raw = (_get_setting("command_aliases_json", "{}") or "{}").strip()
     try:
@@ -695,12 +712,20 @@ def _get_command_aliases() -> dict[str, str]:
             return {str(k).strip().lower(): str(v).strip().lower() for k, v in d.items() if str(k).strip() and str(v).strip()}
     except Exception:
         pass
+    # fallback from tracked self_mods file
+    mods = _load_self_mods()
+    aliases = mods.get("command_aliases", {}) if isinstance(mods, dict) else {}
+    if isinstance(aliases, dict):
+        return {str(k).strip().lower(): str(v).strip().lower() for k, v in aliases.items() if str(k).strip() and str(v).strip()}
     return {}
 
 
 def _set_command_aliases(d: dict[str, str]) -> None:
     clean = {str(k).strip().lower(): str(v).strip().lower() for k, v in d.items() if str(k).strip() and str(v).strip()}
     _set_setting("command_aliases_json", json.dumps(clean, sort_keys=True))
+    mods = _load_self_mods()
+    mods["command_aliases"] = clean
+    _save_self_mods(mods)
 
 
 def _overseer_enabled() -> bool:
@@ -710,6 +735,21 @@ def _overseer_enabled() -> bool:
 def _get_improve_policy() -> str:
     p = (_get_setting("improve_policy", "assisted") or "assisted").strip().lower()
     return p if p in {"manual", "assisted", "auto_low"} else "assisted"
+
+
+def _get_exec_retry_limit() -> int:
+    raw = (_get_setting("exec_retry_limit", "0") or "0").strip()
+    if raw.isdigit():
+        return max(0, min(3, int(raw)))
+    return 0
+
+
+def _set_exec_retry_limit(v: int) -> None:
+    n = max(0, min(3, int(v)))
+    _set_setting("exec_retry_limit", str(n))
+    mods = _load_self_mods()
+    mods["exec_retry_limit"] = n
+    _save_self_mods(mods)
 
 
 def _panic_locked() -> bool:
@@ -2780,7 +2820,7 @@ def _compile_proposal_to_change(proposal_id: int) -> str:
         elif "retry" in text or "latency" in text or "timeout" in text:
             artifact_type = "config_change"
             target = "runtime_retry_policy"
-            cur = int((_get_setting("exec_retry_limit", "0") or "0").strip() or 0)
+            cur = _get_exec_retry_limit()
             new_val = max(0, min(3, cur + 1))
             artifact = {"key": "exec_retry_limit", "value": str(new_val)}
             expected_metric = "failure_rate"
@@ -3047,6 +3087,25 @@ def _latest_run_status(proposal_id: int, phase: str) -> Optional[str]:
     return row["status"] if row else None
 
 
+def _latest_impact_delta(proposal_id: int) -> dict[str, float]:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT notes FROM improvement_runs WHERE proposal_id=? AND phase='impact_compare' ORDER BY id DESC LIMIT 1",
+            (proposal_id,),
+        ).fetchone()
+    if not row:
+        return {}
+    notes = (row["notes"] or "").strip()
+    if notes.startswith("delta="):
+        try:
+            d = json.loads(notes[len("delta="):])
+            if isinstance(d, dict):
+                return {str(k): float(v) for k, v in d.items() if isinstance(v, (int, float))}
+        except Exception:
+            pass
+    return {}
+
+
 def _promote_proposal_sync(proposal_id: int, force: bool = False) -> str:
     import subprocess
 
@@ -3084,6 +3143,15 @@ def _promote_proposal_sync(proposal_id: int, force: bool = False) -> str:
     if imp == "error" and not force:
         return "⛔ Impact comparison indicates regression. Use force only with explicit acceptance."
 
+    # Net-benefit guard for retry policy artifacts
+    if art["artifact_type"] == "config_change" and art["target"] == "runtime_retry_policy" and not force:
+        d = _latest_impact_delta(proposal_id)
+        if d:
+            fail_delta = float(d.get("fail_rate", 0.0))
+            lat_delta = float(d.get("avg_latency", 0.0))
+            if not (fail_delta <= -1.0 and lat_delta <= 300.0):
+                return "⛔ Retry artifact blocked by net-benefit rule (need fail_rate <= -1.0pp and avg_latency <= +300ms)."
+
     # Apply typed artifact (safe mutable scopes only)
     ajson = json.loads(art["artifact_json"] or "{}")
     atype = art["artifact_type"]
@@ -3100,14 +3168,24 @@ def _promote_proposal_sync(proposal_id: int, force: bool = False) -> str:
         val = str((ajson or {}).get("value", "")).strip()
         if key != "exec_retry_limit" or (not val.isdigit()):
             return "⛔ Artifact apply failed: invalid retry policy payload."
-        _set_setting(key, val)
+        _set_exec_retry_limit(int(val))
         applied_desc = f"{key}={val}"
     else:
         return f"⛔ Unsupported artifact scope: {atype}:{target}"
 
     commit_hash = "unknown"
+    repo_dir = Path(__file__).resolve().parent
     try:
-        commit_hash = subprocess.check_output(["git", "-C", str(Path(__file__).resolve().parent), "rev-parse", "--short", "HEAD"], text=True).strip() or "unknown"
+        # Try to materialize applied artifact into git-tracked state (self_mods.json)
+        rel = os.path.relpath(str(SELF_MODS_FILE), str(repo_dir))
+        subprocess.run(["git", "-C", str(repo_dir), "add", rel], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(
+            ["git", "-C", str(repo_dir), "commit", "-m", f"self-mod: apply artifact for proposal #{proposal_id}"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        commit_hash = subprocess.check_output(["git", "-C", str(repo_dir), "rev-parse", "--short", "HEAD"], text=True).strip() or "unknown"
     except Exception:
         pass
 
@@ -3242,6 +3320,52 @@ def _evolution_memory_report(limit: int = 10) -> str:
         lines.append(f"#{int(r['id'])} p#{int(r['proposal_id'] or 0)} {r['signature']} [{r['outcome']}]")
         lines.append(f"  {r['lesson']}")
     return "\n".join(lines)
+
+
+def _improve_funnel_report(days: int = 30) -> str:
+    d = max(1, min(days, 90))
+    with get_db() as conn:
+        generated = conn.execute(
+            "SELECT COUNT(*) AS n FROM improvement_proposals WHERE created_ts >= datetime('now', ?)",
+            (f"-{d} day",),
+        ).fetchone()["n"]
+        actionable = conn.execute(
+            "SELECT COUNT(DISTINCT proposal_id) AS n FROM change_artifacts WHERE created_ts >= datetime('now', ?)",
+            (f"-{d} day",),
+        ).fetchone()["n"]
+        sim_pass = conn.execute(
+            "SELECT COUNT(DISTINCT proposal_id) AS n FROM improvement_runs WHERE phase='simulation' AND status='ok' AND created_ts >= datetime('now', ?)",
+            (f"-{d} day",),
+        ).fetchone()["n"]
+        promoted = conn.execute(
+            "SELECT COUNT(DISTINCT proposal_id) AS n FROM improvement_runs WHERE phase='promotion' AND status='ok' AND created_ts >= datetime('now', ?)",
+            (f"-{d} day",),
+        ).fetchone()["n"]
+        positive = conn.execute(
+            """
+            SELECT COUNT(*) AS n FROM improvement_runs
+            WHERE phase='impact_compare' AND status='ok' AND created_ts >= datetime('now', ?)
+              AND notes LIKE '%"fail_rate":-%'
+            """,
+            (f"-{d} day",),
+        ).fetchone()["n"]
+        neutral_or_rollback = conn.execute(
+            "SELECT COUNT(*) AS n FROM improvement_runs WHERE phase='impact_compare' AND status!='ok' AND created_ts >= datetime('now', ?)",
+            (f"-{d} day",),
+        ).fetchone()["n"]
+
+    actionable_rate = (100.0 * actionable / generated) if generated else 0.0
+    success_rate = (100.0 * positive / promoted) if promoted else 0.0
+    return (
+        f"Improve funnel ({d}d)\n"
+        f"• proposals_generated: {int(generated)}\n"
+        f"• proposals_actionable: {int(actionable)} ({actionable_rate:.1f}%)\n"
+        f"• artifacts_compiled: {int(actionable)}\n"
+        f"• simulations_passed: {int(sim_pass)}\n"
+        f"• promotions_applied: {int(promoted)}\n"
+        f"• changes_positive_impact: {int(positive)} (of applied: {success_rate:.1f}%)\n"
+        f"• changes_rolledback_or_neutral: {int(neutral_or_rollback)}"
+    )
 
 
 def _top_skills(limit: int = 10) -> str:
@@ -3840,6 +3964,17 @@ async def cmd_improve_autopromote(update: Update, ctx: ContextTypes.DEFAULT_TYPE
     await _reply(update, rep)
 
 
+async def cmd_improve_funnel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _owner_only(update):
+        return
+    raw = update.message.text.partition(" ")[2].strip()
+    try:
+        days = int(raw) if raw else 30
+    except Exception:
+        days = 30
+    await _reply(update, _improve_funnel_report(days))
+
+
 async def cmd_evolve_capture(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _owner_only(update):
         return
@@ -4222,6 +4357,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 /improve_policy [manual|assisted|auto_low] — set promotion autonomy policy
 /improve_promote <proposal_id> [force] — promote proposal with risk-policy checks
 /improve_autopromote — auto-promote low-risk proposals (policy=auto_low)
+/improve_funnel [days] — report proposal→artifact→simulation→promotion→impact funnel
 /evolve_capture <proposal_id> — persist proposal outcome lesson into evolution memory
 /evolve_memory [limit] — show recent evolution memory lessons
 /plan goal — create execution manifest
@@ -4325,6 +4461,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             cmd_improve_policy=lambda u: cmd_improve_policy(u, ctx),
             cmd_improve_promote=lambda u: cmd_improve_promote(u, ctx),
             cmd_improve_autopromote=lambda u: cmd_improve_autopromote(u, ctx),
+            cmd_improve_funnel=lambda u: cmd_improve_funnel(u, ctx),
             cmd_evolve_capture=lambda u: cmd_evolve_capture(u, ctx),
             cmd_evolve_memory=lambda u: cmd_evolve_memory(u, ctx),
             cmd_panicstatus=lambda u: cmd_panicstatus(u, ctx),
@@ -4404,8 +4541,21 @@ async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         pass
 
 
+def _apply_self_mods_to_runtime() -> None:
+    mods = _load_self_mods()
+    aliases = mods.get("command_aliases", {}) if isinstance(mods, dict) else {}
+    if isinstance(aliases, dict):
+        _set_setting("command_aliases_json", json.dumps({str(k).strip().lower(): str(v).strip().lower() for k, v in aliases.items() if str(k).strip() and str(v).strip()}, sort_keys=True))
+    retry = mods.get("exec_retry_limit", 0) if isinstance(mods, dict) else 0
+    try:
+        _set_setting("exec_retry_limit", str(max(0, min(3, int(retry)))))
+    except Exception:
+        _set_setting("exec_retry_limit", "0")
+
+
 def main() -> None:
     _init_db()
+    _apply_self_mods_to_runtime()
     if _get_setting("mode") not in MODES:
         _set_setting("mode", DEFAULT_MODE if DEFAULT_MODE in MODES else "strict")
 
@@ -4458,6 +4608,7 @@ def main() -> None:
     app.add_handler(CommandHandler("improve_policy", cmd_improve_policy))
     app.add_handler(CommandHandler("improve_promote", cmd_improve_promote))
     app.add_handler(CommandHandler("improve_autopromote", cmd_improve_autopromote))
+    app.add_handler(CommandHandler("improve_funnel", cmd_improve_funnel))
     app.add_handler(CommandHandler("evolve_capture", cmd_evolve_capture))
     app.add_handler(CommandHandler("evolve_memory", cmd_evolve_memory))
     app.add_handler(CommandHandler("plan", cmd_plan))

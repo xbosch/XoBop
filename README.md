@@ -148,6 +148,7 @@ Operational diagnosis based on telemetry:
 - `/improve_simulate <proposal_id>` — run simulation gate on compiled artifact
 - `/improve_runs [proposal_id]` — list simulation/impact/promotion runs
 - `/improve_compare <proposal_id> [window_days]` — before/after metrics (anchored to artifact deployment when available)
+- `/improve_funnel [days]` — end-to-end improvement funnel metrics
 
 ### Promotion policy
 - `/improve_policy [manual|assisted|auto_low]`
@@ -223,6 +224,7 @@ Important:
 - `EMBEDDING_MODEL=text-embedding-3-small`
 - `ALLOW_RAW_SHELL=0`
 - `PANIC_UNLOCK_CODE=<high_entropy_secret>`
+- `SELF_MODS_FILE=/home/xavi/.openclaw/workspace/xobops-test/config/self_mods.json`
 - `ALLOWED_WRITE_ROOT=/home/xavi/.openclaw/workspace/xobops-test`
 - `READ_ROOT=/home/xavi/.openclaw/workspace/xobops-test`
 
@@ -249,6 +251,8 @@ xobops-test/
 │   ├── smoke_watch.py
 │   ├── eval_suite.py
 │   └── build_signals.py
+├── config/
+│   └── self_mods.json
 ├── artifacts/
 ├── backups/
 ├── memory/
