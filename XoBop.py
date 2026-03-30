@@ -3195,6 +3195,16 @@ Schedule: cron syntax or natural language like every day at 9am
 """)
 
 
+async def cmd_unknown(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _owner_only(update):
+        return
+    text = (update.message.text or "").strip()
+    if not text.startswith("/"):
+        return
+    cmd = text.split()[0]
+    await _reply(update, f"⛔ Unknown command: `{cmd}`\nUse `/help`.")
+
+
 # intent and email helpers moved to xobop/intents.py and xobop/emailer.py
 
 
@@ -3373,6 +3383,7 @@ def main() -> None:
     app.add_handler(CommandHandler("cronoff", cmd_cronoff))
     app.add_handler(CommandHandler("cronrun", cmd_cronrun))
     app.add_handler(CommandHandler("cronruns", cmd_cronruns))
+    app.add_handler(MessageHandler(filters.COMMAND, cmd_unknown))
     app.add_handler(MessageHandler((filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, handle_media_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(_on_error)

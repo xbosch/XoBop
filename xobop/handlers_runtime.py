@@ -165,6 +165,10 @@ async def process_text_message(
     if lower.startswith("/panicunlock"):
         await cmd_panicunlock(update)
         return True
+    if text.startswith("/"):
+        cmd = text.split()[0]
+        await reply(update, f"⛔ Unknown command: `{cmd}`\nUse `/help`.")
+        return True
 
     intent = classify(text)
     if intent["name"] == "cron_list":
