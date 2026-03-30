@@ -1319,6 +1319,14 @@ async def _build_memory_block(query: str) -> str:
     sem_block = ""
     if semantic:
         sem_block = "\n\nRelevant memory:\n" + "\n".join(f"- {m.text}" for m in semantic)
+
+    # Telemetry: make memory read-path observable in logs.
+    try:
+        ids = [m.id for m in semantic]
+        log.info("memory_read query=%r hits=%d ids=%s", query[:80], len(semantic), ids)
+    except Exception:
+        pass
+
     file_block = _build_file_memory_block()
     return _build_structured_memory_block(query) + sem_block + file_block
 

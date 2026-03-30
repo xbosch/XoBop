@@ -179,6 +179,8 @@ PY
 4. **Capability layer** (`xobop/capabilities_*.py`, `xobop/emailer.py`)
    - shell/files/email executable operations
 5. **Agent layer** (`_run_agent` in `XoBop.py`)
+   - Memory read path: semantic retrieval from `memory_items` + `memory_vectors` via `_build_memory_block`
+   - Injects relevant memories into system context before LLM call
    - LLM + tool loop when structured routes do not apply
 6. **Persistence/scheduling layer** (`memory.db`, APScheduler)
    - durable state, cron jobs, run history
@@ -191,8 +193,11 @@ PY
    - command handlers (`/status`, `/cron*`, `/prompt*`, etc.)
    - structured router/actions (deterministic)
    - fallback to `_run_agent()` for general chat/tool loop
-4. Persistence in `memory.db`
-5. Scheduler runs `cron_jobs`, writes `cron_runs`
+4. In `_run_agent()`, memory read path runs first:
+   - query embeddings + similarity retrieval from `memory_items`/`memory_vectors`
+   - relevant memories are injected into prompt context
+5. Persistence in `memory.db`
+6. Scheduler runs `cron_jobs`, writes `cron_runs`
 
 ---
 
@@ -264,6 +269,8 @@ flowchart LR
 
     C --> DB[(memory.db)]
     D --> S[Skill executor]
+    A --> MR[Memory retrieval\n(memory_items + vectors)]
+    MR --> A
     A --> L[LLM]
     L --> S
     S --> DB
