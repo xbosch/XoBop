@@ -16,9 +16,9 @@ State, memory, prompts, and cron metadata are persisted in SQLite (`memory.db`).
 
 - Executes operational commands through controlled capabilities
 - Manages facts/tasks/memory and semantic retrieval context
-- Runs DB-backed cron jobs and records execution history (includes default `db-backup-6h` online backup job)
+- Runs DB-backed cron jobs and records execution history (includes default `db-backup-6h` and `prompt-review-weekly` jobs)
 - Handles attachment-aware email workflow (with Gmail env configured)
-- Supports quiet-hours queueing for non-urgent notifications
+- Supports quiet-hours queueing for non-urgent notifications with digest flush
 - Persists pending actions and restores them after restart
 - Enforces hard shell blacklist for destructive command patterns
 - Exposes expanded `/health` metrics (DB size, tasks, last cron statuses, OpenAI latency)
@@ -123,7 +123,7 @@ Per turn in `_run_agent`:
 - build query from current user text + up to the last 3 user turns
 - retrieve top-3 semantic memories from `memory_items` + `memory_vectors`
 - inject retrieved memories into prompt context
-- if embedding path degrades, lexical fallback retrieval is used
+- if embedding path degrades, SQLite FTS5 lexical fallback retrieval is used
 
 ---
 

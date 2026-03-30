@@ -390,12 +390,22 @@ def _init_db() -> None:
                 delivered INTEGER NOT NULL DEFAULT 0,
                 delivered_ts DATETIME
             );
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS memory_items_fts USING fts5(
+                text,
+                content='memory_items',
+                content_rowid='id'
+            );
         """)
         # lightweight schema migrations for additive columns
         cols = {r['name'] for r in conn.execute("PRAGMA table_info(skill_audit)").fetchall()}
         for col, typ in (("owner_id", "INTEGER"), ("cmd_input", "TEXT"), ("exit_code", "INTEGER")):
             if col not in cols:
                 conn.execute(f"ALTER TABLE skill_audit ADD COLUMN {col} {typ}")
+    # keep FTS mirror aligned
+    with get_db() as conn:
+        conn.execute("INSERT INTO memory_items_fts(memory_items_fts) VALUES('rebuild')")
+
     _bootstrap_default_skills()
     _bootstrap_default_policies()
     _bootstrap_default_prompts()
@@ -412,6 +422,19 @@ def _init_db() -> None:
                 "0 */6 * * *",
                 "db_backup",
                 json.dumps({"backup_dir": str((Path(os.getcwd()) / "backups").resolve()), "repo_dir": os.getcwd()}),
+            ),
+        )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO cron_jobs (name,description,cron_expr,skill_type,skill_args,enabled,alert_owner,updated_ts)
+            VALUES (?,?,?,?,?,1,1,CURRENT_TIMESTAMP)
+            """,
+            (
+                "prompt-review-weekly",
+                "Weekly prompt proposal from usage/failure stats",
+                "0 9 * * 1",
+                "prompt_review",
+                "{}",
             ),
         )
 
@@ -1162,7 +1185,9 @@ def _insert_memory_item_sync(text: str, mem_type: str, importance: float, source
             (text[:MAX_MEMORY_TEXT], mem_type, importance, source, 1 if pinned else 0),
         )
         row = conn.execute("SELECT last_insert_rowid() AS id").fetchone()
-        return int(row["id"])
+        memory_id = int(row["id"])
+        conn.execute("INSERT INTO memory_items_fts(rowid,text) VALUES (?,?)", (memory_id, text[:MAX_MEMORY_TEXT]))
+        return memory_id
 
 
 def _save_memory_vector_sync(memory_id: int, embedding: list[float], model_name: str) -> None:
@@ -1182,6 +1207,8 @@ def _delete_memory_sync(memory_id: int) -> str:
             "UPDATE memory_items SET is_deleted=1 WHERE id=? AND is_deleted=0",
             (memory_id,),
         )
+        if cur.rowcount:
+            conn.execute("DELETE FROM memory_items_fts WHERE rowid=?", (memory_id,))
     return f"✓ Memory {memory_id} deleted." if cur.rowcount else f"Memory not found: {memory_id}"
 
 
@@ -1249,17 +1276,17 @@ def _retrieve_memory_lexical(query: str, k: int = MAX_MEMORY_RESULTS) -> list[Me
     if not terms:
         return []
 
-    like_clause = " OR ".join(["LOWER(text) LIKE ?" for _ in terms])
-    vals = tuple(f"%{t}%" for t in terms)
-    sql = f"""
-        SELECT id,text,mem_type,importance,created_ts,last_access_ts
-        FROM memory_items
-        WHERE is_deleted=0 AND ({like_clause})
-        ORDER BY pinned DESC, importance DESC, last_access_ts DESC, id DESC
+    match_q = " OR ".join(terms)
+    sql = """
+        SELECT mi.id,mi.text,mi.mem_type,mi.importance,mi.created_ts,mi.last_access_ts
+        FROM memory_items_fts f
+        JOIN memory_items mi ON mi.id = f.rowid
+        WHERE f.text MATCH ? AND mi.is_deleted=0
+        ORDER BY mi.pinned DESC, mi.importance DESC, mi.last_access_ts DESC, mi.id DESC
         LIMIT ?
     """
     with get_db() as conn:
-        rows = conn.execute(sql, vals + (max(1, min(k, MAX_MEMORY_RESULTS)),)).fetchall()
+        rows = conn.execute(sql, (match_q, max(1, min(k, MAX_MEMORY_RESULTS)))).fetchall()
         ids = [int(r["id"]) for r in rows]
         if ids:
             conn.executemany(
@@ -1693,6 +1720,27 @@ async def _run_cron_job(job_name: str) -> None:
             loop = asyncio.get_running_loop()
             dst = await loop.run_in_executor(None, lambda: sqlite_online_backup(DB_FILE, backup_dir, repo_dir=repo_dir))
             output = f"DB backup completed: {dst}"
+        elif skill_type == "prompt_review":
+            with get_db() as conn:
+                top = conn.execute("SELECT skill_name,call_count,error_count FROM skill_usage_stats ORDER BY error_count DESC, call_count DESC LIMIT 8").fetchall()
+                recent = conn.execute("SELECT tool_name,status,result FROM runs ORDER BY id DESC LIMIT 30").fetchall()
+            payload = {
+                "top_skills": [dict(r) for r in top],
+                "recent_runs": [dict(r) for r in recent],
+            }
+            resp = await client.chat.completions.create(
+                model=MODEL,
+                messages=[
+                    {"role": "system", "content": "Given skill usage and failures, propose a concise strict prompt improvement. Keep under 120 words."},
+                    {"role": "user", "content": json.dumps(payload)[:5000]},
+                ],
+                temperature=0.1,
+                max_tokens=220,
+            )
+            proposal = (resp.choices[0].message.content or "").strip()
+            global _prompt_proposal
+            _prompt_proposal = {"mode": "strict", "text": proposal}
+            output = "Prompt proposal generated and staged. Use /promptapprove or /promptreject."
         else:
             raise ValueError(f"Unknown cron skill_type: {skill_type}")
     except Exception as exc:
@@ -1767,6 +1815,25 @@ async def _state_persist_loop() -> None:
         await asyncio.sleep(20)
 
 
+async def _quicklook_summary(path: Path) -> str:
+    ext = path.suffix.lower()
+    try:
+        size = path.stat().st_size
+    except Exception:
+        size = 0
+    if ext in {'.jpg', '.jpeg', '.png', '.webp', '.gif'}:
+        return f"Image artifact ({size} bytes)."
+    if ext == '.pdf':
+        return f"PDF artifact ({size} bytes)."
+    try:
+        head = path.read_text(encoding='utf-8', errors='ignore')[:220].replace('\n', ' ')
+        if head.strip():
+            return f"Text preview: {head.strip()}"
+    except Exception:
+        pass
+    return f"File artifact ({size} bytes)."
+
+
 async def _artifact_watch_loop() -> None:
     global _seen_artifacts
     art = Path(ARTIFACT_DIR)
@@ -1777,9 +1844,18 @@ async def _artifact_watch_loop() -> None:
             current = {str(p) for p in art.rglob("*") if p.is_file()}
             new_files = sorted(current - _seen_artifacts)
             _seen_artifacts = current
-            if new_files:
-                newest = new_files[-1]
-                await _notify_owner(f"🆕 New artifact detected:\n{newest}")
+            if new_files and _app is not None:
+                newest = Path(new_files[-1])
+                summary = await _quicklook_summary(newest)
+                await _notify_owner(f"🆕 New artifact detected:\n{newest}\nQuick Look: {summary}")
+                try:
+                    ext = newest.suffix.lower()
+                    if ext in {'.jpg', '.jpeg', '.png', '.webp', '.gif'}:
+                        await _app.bot.send_photo(chat_id=OWNER_ID, photo=str(newest), caption="Artifact preview")
+                    elif ext in {'.pdf', '.log', '.txt'}:
+                        await _app.bot.send_document(chat_id=OWNER_ID, document=str(newest), caption="Artifact file")
+                except Exception:
+                    pass
         except Exception as exc:
             log.warning("Artifact watcher failed: %s", exc)
         await asyncio.sleep(30)
@@ -2325,17 +2401,38 @@ async def cmd_quietflush(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     if not _owner_only(update):
         return
     with get_db() as conn:
-        rows = conn.execute("SELECT id,text FROM notification_queue WHERE delivered=0 ORDER BY id ASC LIMIT 20").fetchall()
+        rows = conn.execute("SELECT id,text FROM notification_queue WHERE delivered=0 ORDER BY id ASC LIMIT 50").fetchall()
+    if not rows:
+        await _reply(update, "No queued notifications.")
+        return
+
+    texts = [r["text"] for r in rows]
+    summary = ""
+    try:
+        joined = "\n".join(texts)[:4000]
+        resp = await client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": "Summarize queued system notifications in 1-2 sentences with the most important item first."},
+                {"role": "user", "content": joined},
+            ],
+            temperature=0.1,
+            max_tokens=140,
+        )
+        summary = (resp.choices[0].message.content or "").strip()
+    except Exception:
+        summary = "Queued notifications summarized unavailable; sending raw count only."
+
     sent = 0
     for r in rows:
         try:
-            await _app.bot.send_message(chat_id=OWNER_ID, text=r["text"])
             with get_db() as conn:
                 conn.execute("UPDATE notification_queue SET delivered=1,delivered_ts=CURRENT_TIMESTAMP WHERE id=?", (int(r["id"]),))
             sent += 1
         except Exception:
             pass
-    await _reply(update, f"Flushed {sent} queued notifications.")
+
+    await _reply(update, f"Quiet-hours digest ({sent} items):\n{summary}")
 
 
 async def cmd_promptproposal(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2700,7 +2797,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 /cronrun name — run now
 /cronruns name [limit] — recent runs
 
-Cron skill_types: run_shell, browse_page, read_file, write_file, append_file, agent, memory_cleanup, db_backup
+Cron skill_types: run_shell, browse_page, read_file, write_file, append_file, agent, memory_cleanup, db_backup, prompt_review
 Schedule: cron syntax or natural language like every day at 9am
 """)
 
