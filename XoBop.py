@@ -2568,8 +2568,8 @@ async def cmd_promptreject(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
 def _run_checkup_sync() -> str:
     import subprocess
     checks = []
-    # Pin to project venv explicitly to avoid interpreter drift.
-    venv_python = (Path(os.getcwd()) / '.venv' / 'bin' / 'python').resolve()
+    # Pin to project venv explicitly (based on XoBop.py location) to avoid cwd/interpreter drift.
+    venv_python = (Path(__file__).resolve().parent / '.venv' / 'bin' / 'python').resolve()
     checks.append(("venv_python", venv_python.exists()))
     req = Path('requirements.txt').resolve()
     checks.append(("requirements_txt", req.exists()))
