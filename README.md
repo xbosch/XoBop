@@ -116,6 +116,25 @@ DAILY_MEMORY_DIR=/home/xavi/.openclaw/workspace/xobops-test/memory
 
 ## Architecture
 
+### System diagram
+
+```mermaid
+flowchart TD
+    TG[Telegram] --> T[XoBop.py\nTransport + Handlers]
+    T --> R[xobop/router.py\nIntent Classification]
+    R --> W[xobop/workflows.py + state.py\nPending Actions / Runtime State]
+    W --> C[xobop/capabilities_* + emailer + services\nExecution Layer]
+
+    T --> A[_run_agent\nPrompt + Tool Loop]
+    A --> M[(memory.db)]
+    A --> FTS[memory_items_fts\nLexical Fallback]
+
+    S[APScheduler] --> J[cron_jobs / cron_runs]
+    J --> C
+    C --> Q[notification_queue\nQuiet-hours Digest]
+    C --> AR[artifacts/ + backups/]
+```
+
 ### Layers
 
 1. **Transport** (`XoBop.py`)
