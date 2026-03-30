@@ -1724,16 +1724,16 @@ async def _exec_file_append(skill: SkillDef, policies: dict, args: dict) -> tupl
 
 
 async def _exec_shell_command(skill: SkillDef, policies: dict, user_query: str, args: dict) -> tuple[str, Optional[int], str, Optional[str]]:
-    command = args["command"]
+    command = args["command"].strip()
     cwd = str(args.get("cwd") or policies.get("default_cwd") or os.getcwd())
     raw = bool(args.get("raw", False))
     timeout = int(args.get("timeout_override") or skill.timeout_sec)
-    policy = _classify_shell(command)
 
+    # Normalize common shorthand
+    command = re.sub(r"\bgit\s+(.+?)\s+push\s+force\b", r"git \1 push --force", command)
+
+    policy = _classify_shell(command)
     allowed_commands = [x.strip() for x in policies.get("allowed_commands", "").split(",") if x.strip()]
-    argv = shlex.split(command) if command.strip() else []
-    if allowed_commands and argv and argv[0] not in allowed_commands:
-        return f"⛔ Command '{argv[0]}' blocked by skill allowlist.", None, "blocked", None
 
     raw_allowed = policies.get("allow_raw_shell", "0") == "1"
     if raw and not raw_allowed:
@@ -1741,15 +1741,33 @@ async def _exec_shell_command(skill: SkillDef, policies: dict, user_query: str, 
     if (skill.requires_force or policy.requires_force or raw) and not _user_forced(user_query):
         return f"⛔ Blocked ({policy.kind}, raw={raw}). Add 'force' to proceed.\nCommand: {command}", None, "blocked", None
 
-    stdout, stderr, rc = await _run_shell_async(command, cwd, timeout, raw)
-    parts = [f"Kind: {policy.kind}", f"CWD: {cwd}"]
-    if stdout.strip():
-        parts.append(f"STDOUT:\n{stdout.strip()}")
-    if stderr.strip():
-        parts.append(f"STDERR:\n{stderr.strip()}")
-    parts.append(f"Exit: {rc}")
-    result, artifact = _shorten_or_artifact(skill.name, "\n".join(parts))
-    return result, rc, "ok", artifact
+    # Support chained commands without requiring raw shell.
+    # Execute segments sequentially and stop on first non-zero exit.
+    segments = [s.strip() for s in command.split("&&") if s.strip()]
+    if not segments:
+        return "⛔ Empty command.", None, "blocked", None
+
+    outputs = [f"Kind: {policy.kind}", f"CWD: {cwd}"]
+    last_rc: Optional[int] = 0
+    for i, seg in enumerate(segments, start=1):
+        argv = shlex.split(seg) if seg else []
+        if allowed_commands and argv and argv[0] not in allowed_commands:
+            return f"⛔ Command '{argv[0]}' blocked by skill allowlist.", None, "blocked", None
+
+        stdout, stderr, rc = await _run_shell_async(seg, cwd, timeout, raw=False)
+        outputs.append(f"[step {i}] $ {seg}")
+        if stdout.strip():
+            outputs.append(f"STDOUT:\n{stdout.strip()}")
+        if stderr.strip():
+            outputs.append(f"STDERR:\n{stderr.strip()}")
+        outputs.append(f"Exit: {rc}")
+        last_rc = rc
+        if rc != 0:
+            break
+
+    result, artifact = _shorten_or_artifact(skill.name, "\n".join(outputs))
+    status = "ok" if (last_rc == 0) else "error"
+    return result, last_rc, status, artifact
 
 
 async def _call_skill(chat_id: int, user_query: str, mode: str, skill_name: str, args: dict) -> str:
