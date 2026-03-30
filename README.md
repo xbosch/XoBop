@@ -274,6 +274,20 @@ Current suite validates:
 - shell allowlist enforcement
 - write-root boundary gate enforcement
 
+## Ops instrumentation + friction signals (Sprint A)
+
+```bash
+cd /home/xavi/.openclaw/workspace/xobops-test
+.venv/bin/python scripts/build_signals.py
+```
+
+This materializes daily metrics in `op_signals_daily` from `op_events`:
+- total events
+- failures
+- unknown command count
+- retries total
+- median / p95 latency
+
 ---
 
 ## Backup safety (critical)

@@ -89,12 +89,14 @@ async def process_text_message(
     cmd_panicunlock,
     panic_locked,
     panic_bypass_text,
+    op_event,
     log,
 ) -> bool:
     if not owner_only(update):
         return True
 
     if panic_locked() and not panic_bypass_text(text):
+        op_event("route_selected", chat_id=chat_id, route="panic_block", status="blocked")
         await reply(update, "⛔ Panic-lock active. Allowed commands: /panicstatus, /panicunlock <code>, /status, /health, /checkup, /help")
         return True
 
@@ -126,6 +128,7 @@ async def process_text_message(
 
     lower = text.lower()
     if lower.startswith("/exec "):
+        op_event("route_selected", chat_id=chat_id, route="cmd_exec")
         cmd = text[6:].strip()
         if not cmd:
             await reply(update, "Use: `/exec <command>`")
@@ -148,12 +151,15 @@ async def process_text_message(
         await cmd_cronruns(update)
         return True
     if lower.startswith("/status"):
+        op_event("route_selected", chat_id=chat_id, route="cmd_status")
         await cmd_status(update)
         return True
     if lower.startswith("/health"):
+        op_event("route_selected", chat_id=chat_id, route="cmd_health")
         await cmd_health(update)
         return True
     if lower.startswith("/checkup"):
+        op_event("health_check", chat_id=chat_id, route="cmd_checkup")
         await cmd_checkup(update)
         return True
     if lower.startswith("/panicstatus"):
@@ -167,10 +173,12 @@ async def process_text_message(
         return True
     if text.startswith("/"):
         cmd = text.split()[0]
+        op_event("unknown_command", chat_id=chat_id, command=cmd, status="error")
         await reply(update, f"⛔ Unknown command: `{cmd}`\nUse `/help`.")
         return True
 
     intent = classify(text)
+    op_event("route_selected", chat_id=chat_id, route=f"intent:{intent['name']}")
     if intent["name"] == "cron_list":
         await reply(update, list_cron_jobs())
         return True

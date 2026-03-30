@@ -269,6 +269,56 @@ def _init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_runs_chat_id_id ON runs(chat_id, id);
             CREATE INDEX IF NOT EXISTS idx_runs_status_ts ON runs(status, timestamp);
 
+            CREATE TABLE IF NOT EXISTS op_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                chat_id INTEGER NOT NULL DEFAULT 0,
+                event_type TEXT NOT NULL,
+                route TEXT DEFAULT '',
+                command TEXT DEFAULT '',
+                status TEXT DEFAULT 'ok',
+                latency_ms INTEGER,
+                retries INTEGER NOT NULL DEFAULT 0,
+                metadata_json TEXT DEFAULT '{}'
+            );
+            CREATE INDEX IF NOT EXISTS idx_op_events_ts ON op_events(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_op_events_type_ts ON op_events(event_type, timestamp);
+
+            CREATE TABLE IF NOT EXISTS op_signals_daily (
+                day TEXT PRIMARY KEY,
+                events_total INTEGER NOT NULL DEFAULT 0,
+                failures INTEGER NOT NULL DEFAULT 0,
+                command_unknown INTEGER NOT NULL DEFAULT 0,
+                retries_total INTEGER NOT NULL DEFAULT 0,
+                median_latency_ms REAL NOT NULL DEFAULT 0,
+                p95_latency_ms REAL NOT NULL DEFAULT 0,
+                updated_ts DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS improvement_proposals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_ts DATETIME DEFAULT CURRENT_TIMESTAMP,
+                status TEXT NOT NULL DEFAULT 'proposed',
+                risk_level TEXT NOT NULL DEFAULT 'low',
+                title TEXT NOT NULL,
+                problem_statement TEXT NOT NULL,
+                suspected_cause TEXT NOT NULL,
+                proposed_change TEXT NOT NULL,
+                expected_benefit TEXT NOT NULL,
+                metric_target TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS improvement_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                proposal_id INTEGER,
+                created_ts DATETIME DEFAULT CURRENT_TIMESTAMP,
+                phase TEXT NOT NULL,
+                status TEXT NOT NULL,
+                before_json TEXT DEFAULT '{}',
+                after_json TEXT DEFAULT '{}',
+                notes TEXT DEFAULT ''
+            );
+
             CREATE TABLE IF NOT EXISTS skills (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
@@ -1739,6 +1789,7 @@ async def _run_cron_job(job_name: str) -> None:
     if _panic_locked():
         duration_ms = int((time.monotonic() - start) * 1000)
         _record_cron_run(job_name, "skipped", duration_ms, "", "panic-lock active")
+        _record_op_event("cron_run", route=job_name, status="skipped", latency_ms=duration_ms, metadata={"reason": "panic-lock"})
         return
     with get_db() as conn:
         row = conn.execute("SELECT * FROM cron_jobs WHERE name=? AND enabled=1", (job_name,)).fetchone()
@@ -1816,6 +1867,13 @@ async def _run_cron_job(job_name: str) -> None:
         status = "error"
 
     duration_ms = int((time.monotonic() - start) * 1000)
+    _record_op_event(
+        "cron_run",
+        route=job_name,
+        status=status,
+        latency_ms=duration_ms,
+        metadata={"skill_type": skill_type},
+    )
     loop = asyncio.get_running_loop()
     _fire_and_forget(
         loop,
@@ -1996,6 +2054,36 @@ async def _notification_flush_loop() -> None:
 # =============================================================================
 
 
+def _record_op_event(
+    event_type: str,
+    *,
+    chat_id: int = 0,
+    route: str = "",
+    command: str = "",
+    status: str = "ok",
+    latency_ms: Optional[int] = None,
+    retries: int = 0,
+    metadata: Optional[dict] = None,
+) -> None:
+    with get_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO op_events (chat_id,event_type,route,command,status,latency_ms,retries,metadata_json)
+            VALUES (?,?,?,?,?,?,?,?)
+            """,
+            (
+                int(chat_id),
+                event_type,
+                route,
+                command,
+                status,
+                latency_ms,
+                int(retries),
+                json.dumps(metadata or {}),
+            ),
+        )
+
+
 def _record_run(
     chat_id: int,
     user_query: str,
@@ -2028,6 +2116,15 @@ def _record_run(
                 artifact_path,
             ),
         )
+    _record_op_event(
+        "tool_run",
+        chat_id=chat_id,
+        route=(tool_name or ""),
+        command=((tool_args or {}).get("command", "") if isinstance(tool_args, dict) else ""),
+        status=status,
+        latency_ms=duration_ms,
+        metadata={"mode": mode, "exit_code": exit_code},
+    )
 
 
 async def _exec_file_read(skill: SkillDef, policies: dict, args: dict) -> tuple[str, Optional[int], str, Optional[str]]:
@@ -2138,6 +2235,9 @@ async def _call_skill(chat_id: int, user_query: str, mode: str, skill_name: str,
             ok, msg = _enforce_rate_limit("shell_calls", shell_limit)
             if not ok:
                 return msg
+
+        if _user_forced(user_query):
+            _record_op_event("manual_override", chat_id=chat_id, route=skill_name, status="ok")
 
         if skill.requires_force and not _user_forced(user_query):
             result, status = f"⛔ Skill '{skill.name}' requires force.", "blocked"
@@ -2751,6 +2851,12 @@ async def cmd_checkup(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     loop = asyncio.get_running_loop()
     rep = await loop.run_in_executor(None, _run_checkup_sync)
+    _record_op_event(
+        "health_check",
+        chat_id=update.effective_chat.id,
+        route="cmd_checkup",
+        status=("ok" if "RESULT: PASS" in rep else "error"),
+    )
     await _reply(update, rep)
 
 
@@ -3202,6 +3308,7 @@ async def cmd_unknown(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not text.startswith("/"):
         return
     cmd = text.split()[0]
+    _record_op_event("unknown_command", chat_id=update.effective_chat.id, command=cmd, status="error")
     await _reply(update, f"⛔ Unknown command: `{cmd}`\nUse `/help`.")
 
 
@@ -3222,6 +3329,10 @@ async def handle_media_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     text = (update.message.text or "").strip()
     chat_id = update.effective_chat.id
+
+    if text:
+        cmd = text.split()[0] if text.startswith("/") else ""
+        _record_op_event("command_requested", chat_id=chat_id, command=cmd, metadata={"text_len": len(text)})
 
     if _panic_locked() and not _is_panic_bypass_text(text):
         await _reply(update, "⛔ Panic-lock active. Allowed commands: /panicstatus, /panicunlock <code>, /status, /health, /checkup, /help")
@@ -3251,6 +3362,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             cmd_panicunlock=lambda u: cmd_panicunlock(u, ctx),
             panic_locked=_panic_locked,
             panic_bypass_text=_is_panic_bypass_text,
+            op_event=_record_op_event,
             log=log,
         )
     except Exception as exc:
