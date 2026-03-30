@@ -224,6 +224,7 @@ Important:
 - `EMBEDDING_MODEL=text-embedding-3-small`
 - `ALLOW_RAW_SHELL=0`
 - `USE_CAPABILITY_FACADE_SHELL=0` (migration flag; set to `1` to enable shell facade path)
+- `USE_SHELL_REPLAY_CONTROLLER=0` (set to `1` to enable shell-only isolated replay in simulation)
 - `PANIC_UNLOCK_CODE=<high_entropy_secret>`
 - `SELF_MODS_FILE=/home/xavi/.openclaw/workspace/xobops-test/config/self_mods.json`
 - `ALLOWED_WRITE_ROOT=/home/xavi/.openclaw/workspace/xobops-test`
@@ -247,7 +248,12 @@ xobops-test/
 │   ├── capabilities_shell.py
 │   ├── services.py
 │   ├── shell_facade.py
-│   └── handlers_runtime.py
+│   ├── handlers_runtime.py
+│   └── simulation/
+│       ├── manifest.py
+│       ├── temp_db.py
+│       ├── golden_traces.py
+│       └── replay_controller.py
 ├── scripts/
 │   ├── smoke_test.sh
 │   ├── smoke_watch.py

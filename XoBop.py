@@ -67,6 +67,7 @@ from xobop.db import db_session, sqlite_online_backup
 from xobop.handlers_runtime import process_media_message, process_text_message
 from xobop.router import classify
 from xobop.shell_facade import get_shell_executor
+from xobop.simulation import TempDbManager, shell_golden_cases, shell_replay_cases, ReplayController, apply_artifact_to_temp_settings
 
 # =============================================================================
 # Logging
@@ -108,6 +109,7 @@ ARTIFACT_DIR = Path(os.getenv("ARTIFACT_DIR", "artifacts")).resolve()
 ALLOWED_WRITE_ROOT = Path(os.getenv("ALLOWED_WRITE_ROOT", os.getcwd())).resolve()
 ALLOW_RAW_SHELL = os.getenv("ALLOW_RAW_SHELL", "0").strip() == "1"
 USE_CAPABILITY_FACADE_SHELL = os.getenv("USE_CAPABILITY_FACADE_SHELL", "0").strip() == "1"
+USE_SHELL_REPLAY_CONTROLLER = os.getenv("USE_SHELL_REPLAY_CONTROLLER", "0").strip() == "1"
 PANIC_UNLOCK_CODE = os.getenv("PANIC_UNLOCK_CODE", "").strip()
 READ_ROOT = Path(os.getenv("READ_ROOT", str(ALLOWED_WRITE_ROOT))).resolve()
 EMBEDDING_FALLBACK = os.getenv("EMBEDDING_FALLBACK", "1").strip() == "1"
@@ -2868,6 +2870,61 @@ def _compile_proposal_to_change(proposal_id: int) -> str:
     return f"Artifact #{aid} compiled for proposal #{proposal_id}: {artifact_type} -> {target}"
 
 
+def _sim_shell_policy_check(command: str) -> dict:
+    hard_block = [
+        r"\brm\s+-rf\s+/$",
+        r"\brm\s+-rf\s+/\s",
+        r"\bmkfs(\.|\s)",
+        r"\bdd\s+if=",
+        r"\bshutdown\b",
+        r"\breboot\b",
+        r"\bpoweroff\b",
+    ]
+    for pat in hard_block:
+        if re.search(pat, command, re.I):
+            return {"ok": False, "reason": f"hard-block:{pat}"}
+    pol = _classify_shell(command)
+    if pol.kind == "destructive":
+        return {"ok": False, "reason": "destructive"}
+    return {"ok": True}
+
+
+def _build_shell_replay_diff(*, proposal_id: int, artifact: dict, replay_results: list[dict], golden_results: list[dict], manifest) -> dict:
+    targeted = [r for r in replay_results if r.get("case_class") == "targeted"]
+    targeted_improved = sum(1 for r in targeted if bool(r.get("actual_ok")) == bool(r.get("expect_ok", True)))
+    targeted_regressed = sum(1 for r in targeted if bool(r.get("actual_ok")) != bool(r.get("expect_ok", True)))
+    golden_failed = sum(1 for r in golden_results if not r.get("pass"))
+    policy_violations = 0
+    msum = manifest.summary()
+    summary = {
+        "targeted_cases": len(targeted),
+        "golden_cases": len(golden_results),
+        "targeted_improved": targeted_improved,
+        "targeted_regressed": targeted_regressed,
+        "golden_failed": golden_failed,
+        "policy_violations": policy_violations,
+        "side_effects_intercepted": int(msum.get("side_effects_intercepted", 0)),
+        "live_side_effects": int(msum.get("live_side_effects", 0)),
+    }
+    status = "pass"
+    if summary["golden_failed"] > 0 or summary["policy_violations"] > 0 or summary["live_side_effects"] != 0:
+        status = "fail"
+    elif summary["targeted_improved"] <= summary["targeted_regressed"]:
+        status = "fail"
+    return {
+        "proposal_id": proposal_id,
+        "artifact_id": int(artifact.get("id") or 0),
+        "artifact_type": artifact.get("artifact_type"),
+        "target": artifact.get("target"),
+        "mode": "simulate",
+        "status": status,
+        "summary": summary,
+        "replay_results": replay_results,
+        "golden_results": golden_results,
+        "manifest_summary": msum,
+    }
+
+
 def _simulate_proposal_sync(proposal_id: int) -> str:
     import subprocess
 
@@ -2962,6 +3019,37 @@ def _simulate_proposal_sync(proposal_id: int) -> str:
         replay_note = str(exc)[:300]
     checks.append(("replay_regression", replay_ok, replay_note))
 
+    shell_replay_report = None
+    if USE_SHELL_REPLAY_CONTROLLER:
+        run_id = f"sim_{proposal_id}_{int(time.time())}"
+        tmp_root = Path("/tmp/xobop_sim")
+        dbm = TempDbManager(DB_FILE, str(tmp_root))
+        temp_db = dbm.fork(run_id)
+        sandbox_root = str(tmp_root / run_id / "sandbox")
+        try:
+            rc = ReplayController(command_policy_checker=_sim_shell_policy_check, diff_builder=_build_shell_replay_diff)
+            art_obj = {
+                "id": int(art["id"]),
+                "artifact_type": art["artifact_type"],
+                "target": art["target"],
+                "artifact_json": art["artifact_json"],
+            }
+            shell_replay_report = rc.run(
+                proposal_id=proposal_id,
+                artifact=art_obj,
+                replay_cases=shell_replay_cases(),
+                golden_cases=shell_golden_cases(),
+                temp_db_path=temp_db,
+                sandbox_root=sandbox_root,
+                apply_artifact_to_temp_state=apply_artifact_to_temp_settings,
+            )
+            replay_ok2 = (shell_replay_report.get("status") == "pass")
+            checks.append(("shell_replay_controller", replay_ok2, json.dumps(shell_replay_report.get("summary", {}))[:300]))
+        except Exception as exc:
+            checks.append(("shell_replay_controller", False, str(exc)[:300]))
+        finally:
+            dbm.cleanup(run_id)
+
     overall = all(ok for _, ok, _ in checks)
 
     with get_db() as conn:
@@ -2977,6 +3065,8 @@ def _simulate_proposal_sync(proposal_id: int) -> str:
             raise ValueError(f"Proposal not found: {proposal_id}")
         before = {"proposal_id": proposal_id, "risk_level": row["risk_level"], "title": row["title"], "artifact_id": int(art["id"]), "artifact_type": art["artifact_type"]}
         after = {k: {"ok": ok, "note": note} for k, ok, note in checks}
+        if shell_replay_report is not None:
+            after["shell_replay_report"] = shell_replay_report
         conn.execute(
             """
             INSERT INTO improvement_runs(proposal_id,phase,status,before_json,after_json,notes)
