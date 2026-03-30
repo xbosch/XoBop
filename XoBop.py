@@ -2281,6 +2281,70 @@ async def _run_agent(chat_id: int, query: str, force: bool = False) -> str:
 # =============================================================================
 
 
+def _system_pulse() -> dict[str, str]:
+    pulse: dict[str, str] = {}
+    try:
+        st = os.statvfs("/")
+        total = st.f_blocks * st.f_frsize
+        free = st.f_bavail * st.f_frsize
+        free_pct = (free / total * 100.0) if total > 0 else 0.0
+        pulse["disk_free_pct"] = f"{free_pct:.1f}%"
+        pulse["disk_status"] = "ok" if free_pct >= 10.0 else "low"
+    except Exception:
+        pulse["disk_free_pct"] = "n/a"
+        pulse["disk_status"] = "unknown"
+
+    try:
+        load1, load5, _ = os.getloadavg()
+        cpu_count = max(1, (os.cpu_count() or 1))
+        load_norm = load1 / cpu_count
+        pulse["load1"] = f"{load1:.2f}"
+        pulse["load5"] = f"{load5:.2f}"
+        pulse["load_status"] = "ok" if load_norm < 1.0 else "high"
+    except Exception:
+        pulse["load1"] = "n/a"
+        pulse["load5"] = "n/a"
+        pulse["load_status"] = "unknown"
+
+    try:
+        mem_total_kb = 0
+        mem_avail_kb = 0
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8", errors="ignore").splitlines():
+            if line.startswith("MemTotal:"):
+                mem_total_kb = int(line.split()[1])
+            elif line.startswith("MemAvailable:"):
+                mem_avail_kb = int(line.split()[1])
+        mem_avail_pct = (mem_avail_kb / mem_total_kb * 100.0) if mem_total_kb > 0 else 0.0
+        pulse["mem_avail_pct"] = f"{mem_avail_pct:.1f}%"
+        pulse["mem_status"] = "ok" if mem_avail_pct >= 10.0 else "low"
+    except Exception:
+        pulse["mem_avail_pct"] = "n/a"
+        pulse["mem_status"] = "unknown"
+
+    # Optional thermal read (common Linux paths)
+    temp_c = None
+    for p in [
+        Path("/sys/class/thermal/thermal_zone0/temp"),
+        Path("/sys/class/hwmon/hwmon0/temp1_input"),
+    ]:
+        try:
+            if p.exists():
+                raw = p.read_text().strip()
+                v = float(raw)
+                temp_c = (v / 1000.0) if v > 1000 else v
+                break
+        except Exception:
+            continue
+    if temp_c is None:
+        pulse["cpu_temp_c"] = "n/a"
+        pulse["temp_status"] = "unknown"
+    else:
+        pulse["cpu_temp_c"] = f"{temp_c:.1f}"
+        pulse["temp_status"] = "ok" if temp_c < 80.0 else "hot"
+
+    return pulse
+
+
 def _health_report() -> str:
     with get_db() as conn:
         db_size = Path(DB_FILE).resolve().stat().st_size if Path(DB_FILE).exists() else 0
@@ -2300,6 +2364,7 @@ def _health_report() -> str:
             "SELECT job_name,status,duration_ms FROM cron_runs ORDER BY id DESC LIMIT 3"
         ).fetchall()
     cron_tail = "\n".join([f"  - {r['job_name']}: {'✅' if r['status']=='ok' else '❌'} ({r['duration_ms']}ms)" for r in last_cron]) or "  - none"
+    pulse = _system_pulse()
     return (
         f"• DB size: {db_size/1024/1024:.2f} MB\n"
         f"• Messages: {messages}\n"
@@ -2310,6 +2375,10 @@ def _health_report() -> str:
         f"• OpenAI latency (last): {_last_openai_latency_ms:.1f} ms\n"
         f"• Avg tool latency 1h: {float(avg_ms):.1f} ms\n"
         f"• Errors 1h: {int(errors)}\n"
+        f"• Pulse: disk={pulse.get('disk_free_pct','n/a')} ({pulse.get('disk_status','unknown')}), "
+        f"mem={pulse.get('mem_avail_pct','n/a')} ({pulse.get('mem_status','unknown')}), "
+        f"load1={pulse.get('load1','n/a')} ({pulse.get('load_status','unknown')}), "
+        f"temp={pulse.get('cpu_temp_c','n/a')}C ({pulse.get('temp_status','unknown')})\n"
         f"• Last cron runs:\n{cron_tail}"
     )
 
@@ -2601,6 +2670,12 @@ def _run_checkup_sync() -> str:
             dep_note = str(exc)[:180]
     checks.append(("pip_check", dep_ok))
 
+    pulse = _system_pulse()
+    checks.append(("pulse_disk", pulse.get("disk_status") in {"ok", "unknown"}))
+    checks.append(("pulse_mem", pulse.get("mem_status") in {"ok", "unknown"}))
+    checks.append(("pulse_load", pulse.get("load_status") in {"ok", "unknown"}))
+    checks.append(("pulse_temp", pulse.get("temp_status") in {"ok", "unknown"}))
+
     bad = [name for name, ok in checks if not ok]
     git_rev = "unknown"
     try:
@@ -2613,6 +2688,12 @@ def _run_checkup_sync() -> str:
     lines.append(f"• git_rev: {git_rev}")
     lines.append(f"• venv_python_path: {venv_python}")
     lines.append(f"• venv_python_resolved: {venv_python.resolve()}")
+    lines.append(
+        f"• pulse: disk={pulse.get('disk_free_pct','n/a')} ({pulse.get('disk_status','unknown')}), "
+        f"mem={pulse.get('mem_avail_pct','n/a')} ({pulse.get('mem_status','unknown')}), "
+        f"load1={pulse.get('load1','n/a')} ({pulse.get('load_status','unknown')}), "
+        f"temp={pulse.get('cpu_temp_c','n/a')}C ({pulse.get('temp_status','unknown')})"
+    )
     lines.append(f"• pip_check_note: {dep_note}")
     if bad:
         lines.append(f"RESULT: FAIL ({', '.join(bad)})")

@@ -22,6 +22,7 @@ State, memory, prompts, and cron metadata are persisted in SQLite (`memory.db`).
 - Persists pending actions and restores them after restart
 - Enforces hard shell blacklist for destructive command patterns
 - Exposes expanded `/health` metrics (DB size, tasks, last cron statuses, OpenAI latency)
+- Adds host System Pulse in `/health` and `/checkup` (disk/memory/load/temperature status)
 - Adds `/checkup` drift diagnostics and plan-then-execute (`/plan` + `/go`) workflow
 - Auto-refreshes `memory/SYSTEM_MAP.md` weekly via cron
 
