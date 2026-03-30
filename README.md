@@ -30,6 +30,7 @@ The goal is operational reliability over chatty behavior.
 - Online SQLite backup capability (`db_backup` cron skill, uses SQLite backup API)
 - Pending action hydration across restarts (session snapshot in `sessions` table)
 - Artifact watcher that notifies owner when new files appear in `artifacts/`
+- Quiet-hours notification queue (stores alerts in `notification_queue`, flushes later)
 
 ---
 
@@ -212,6 +213,9 @@ Core examples:
 - `/mode strict|normal`
 - `/promptshow`
 - `/promptset strict|normal <text|reset>`
+- `/quiethours HH:MM-HH:MM`
+- `/quietoff`
+- `/quietflush`
 - `/exec <command>`
 - `/cronadd ...`
 - `/cronlist`

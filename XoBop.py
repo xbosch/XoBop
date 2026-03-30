@@ -378,6 +378,15 @@ def _init_db() -> None:
                 value TEXT NOT NULL,
                 updated_ts DATETIME DEFAULT CURRENT_TIMESTAMP
             );
+
+            CREATE TABLE IF NOT EXISTS notification_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                created_ts DATETIME DEFAULT CURRENT_TIMESTAMP,
+                delivered INTEGER NOT NULL DEFAULT 0,
+                delivered_ts DATETIME
+            );
         """)
     _bootstrap_default_skills()
     _bootstrap_default_policies()
@@ -522,6 +531,38 @@ def _set_setting(key: str, value: str) -> None:
 
 def _get_mode() -> str:
     return _get_setting("mode", "strict") or "strict"
+
+
+def _in_quiet_hours() -> bool:
+    q = (_get_setting("quiet_hours", "") or "").strip()
+    if not q:
+        return False
+    try:
+        start_s, end_s = [x.strip() for x in q.split("-", 1)]
+        sh, sm = [int(x) for x in start_s.split(":", 1)]
+        eh, em = [int(x) for x in end_s.split(":", 1)]
+    except Exception:
+        return False
+    now = datetime.now().hour * 60 + datetime.now().minute
+    start = sh * 60 + sm
+    end = eh * 60 + em
+    if start <= end:
+        return start <= now <= end
+    return now >= start or now <= end
+
+
+def _queue_notification(chat_id: int, text: str) -> None:
+    with get_db() as conn:
+        conn.execute("INSERT INTO notification_queue (chat_id,text,delivered) VALUES (?,?,0)", (chat_id, text[:TEXT_LIMIT]))
+
+
+async def _notify_owner(text: str) -> None:
+    if _app is None:
+        return
+    if _in_quiet_hours():
+        _queue_notification(OWNER_ID, text)
+        return
+    await _app.bot.send_message(chat_id=OWNER_ID, text=text)
 
 
 def _save_session_state(key: str, obj: dict) -> None:
@@ -1585,6 +1626,7 @@ def _record_cron_run(name: str, status: str, duration_ms: int, output: str, erro
 _app: Optional[Any] = None
 _state_task: Optional[asyncio.Task] = None
 _artifact_task: Optional[asyncio.Task] = None
+_notify_task: Optional[asyncio.Task] = None
 _seen_artifacts: set[str] = set()
 
 
@@ -1647,7 +1689,7 @@ async def _run_cron_job(job_name: str) -> None:
             else f"🚨 *Cron FAILED: {job_name}*\n`{error[:500]}`"
         )
         try:
-            await _app.bot.send_message(chat_id=OWNER_ID, text=msg, parse_mode="Markdown")
+            await _notify_owner(msg)
         except TelegramError as exc:
             log.error("Failed to send cron alert: %s", exc)
 
@@ -1708,11 +1750,34 @@ async def _artifact_watch_loop() -> None:
             current = {str(p) for p in art.rglob("*") if p.is_file()}
             new_files = sorted(current - _seen_artifacts)
             _seen_artifacts = current
-            if new_files and _app is not None:
+            if new_files:
                 newest = new_files[-1]
-                await _app.bot.send_message(chat_id=OWNER_ID, text=f"🆕 New artifact detected:\n{newest}")
+                await _notify_owner(f"🆕 New artifact detected:\n{newest}")
         except Exception as exc:
             log.warning("Artifact watcher failed: %s", exc)
+        await asyncio.sleep(30)
+
+
+async def _notification_flush_loop() -> None:
+    while True:
+        try:
+            if not _in_quiet_hours() and _app is not None:
+                with get_db() as conn:
+                    rows = conn.execute(
+                        "SELECT id,chat_id,text FROM notification_queue WHERE delivered=0 ORDER BY id ASC LIMIT 5"
+                    ).fetchall()
+                for r in rows:
+                    try:
+                        await _app.bot.send_message(chat_id=int(r["chat_id"]), text=r["text"])
+                        with get_db() as conn:
+                            conn.execute(
+                                "UPDATE notification_queue SET delivered=1,delivered_ts=CURRENT_TIMESTAMP WHERE id=?",
+                                (int(r["id"]),),
+                            )
+                    except Exception:
+                        pass
+        except Exception as exc:
+            log.warning("Notification flush failed: %s", exc)
         await asyncio.sleep(30)
 
 
@@ -2176,6 +2241,45 @@ async def cmd_promptset(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await _reply(update, f"✅ Updated *{mode}* prompt ({len(value)} chars).")
 
 
+async def cmd_quiethours(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _owner_only(update):
+        return
+    raw = update.message.text.partition(" ")[2].strip()
+    if not raw:
+        cur = _get_setting("quiet_hours", "") or "off"
+        await _reply(update, f"Current quiet hours: {cur}. Use `/quiethours HH:MM-HH:MM`.")
+        return
+    if not re.match(r"^\d{2}:\d{2}-\d{2}:\d{2}$", raw):
+        await _reply(update, "Format: `/quiethours HH:MM-HH:MM` (24h)")
+        return
+    _set_setting("quiet_hours", raw)
+    await _reply(update, f"✅ Quiet hours set: {raw}")
+
+
+async def cmd_quietoff(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _owner_only(update):
+        return
+    _set_setting("quiet_hours", "")
+    await _reply(update, "✅ Quiet hours disabled")
+
+
+async def cmd_quietflush(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _owner_only(update):
+        return
+    with get_db() as conn:
+        rows = conn.execute("SELECT id,text FROM notification_queue WHERE delivered=0 ORDER BY id ASC LIMIT 20").fetchall()
+    sent = 0
+    for r in rows:
+        try:
+            await _app.bot.send_message(chat_id=OWNER_ID, text=r["text"])
+            with get_db() as conn:
+                conn.execute("UPDATE notification_queue SET delivered=1,delivered_ts=CURRENT_TIMESTAMP WHERE id=?", (int(r["id"]),))
+            sent += 1
+        except Exception:
+            pass
+    await _reply(update, f"Flushed {sent} queued notifications.")
+
+
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _owner_only(update):
         return
@@ -2467,6 +2571,9 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 /mode [strict|normal] — get or set mode
 /promptshow — show active runtime prompt
 /promptset mode text — set runtime prompt (strict/normal)
+/quiethours HH:MM-HH:MM — queue notifications during quiet window
+/quietoff — disable quiet hours
+/quietflush — flush queued notifications now
 /status — system status
 /health — health summary
 /topskills — most used skills
@@ -2538,7 +2645,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 # =============================================================================
 
 async def _post_init(app: Application) -> None:
-    global _app, _state_task, _artifact_task
+    global _app, _state_task, _artifact_task, _notify_task
     _app = app
     scheduler = _build_scheduler()
     app.bot_data["scheduler"] = scheduler
@@ -2553,26 +2660,28 @@ async def _post_init(app: Application) -> None:
         STATE.pending_action_by_chat = {int(k): v for k, v in pending.items()}
         if STATE.pending_action_by_chat:
             try:
-                await _app.bot.send_message(chat_id=OWNER_ID, text="Resuming pending action state from previous session.")
+                await _notify_owner("Resuming pending action state from previous session.")
             except Exception:
                 pass
 
     _state_task = asyncio.create_task(_state_persist_loop())
     _artifact_task = asyncio.create_task(_artifact_watch_loop())
+    _notify_task = asyncio.create_task(_notification_flush_loop())
 
 
 async def _post_shutdown(app: Application) -> None:
-    global _state_task, _artifact_task
+    global _state_task, _artifact_task, _notify_task
     scheduler = app.bot_data.get("scheduler")
     if scheduler and scheduler.running:
         scheduler.shutdown(wait=False)
         log.info("Scheduler stopped.")
 
-    for t in (_state_task, _artifact_task):
+    for t in (_state_task, _artifact_task, _notify_task):
         if t and not t.done():
             t.cancel()
     _state_task = None
     _artifact_task = None
+    _notify_task = None
 
 
 async def _graceful_shutdown(app: Application) -> None:
@@ -2625,6 +2734,9 @@ def main() -> None:
     app.add_handler(CommandHandler("mode", cmd_mode))
     app.add_handler(CommandHandler("promptshow", cmd_promptshow))
     app.add_handler(CommandHandler("promptset", cmd_promptset))
+    app.add_handler(CommandHandler("quiethours", cmd_quiethours))
+    app.add_handler(CommandHandler("quietoff", cmd_quietoff))
+    app.add_handler(CommandHandler("quietflush", cmd_quietflush))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("health", cmd_health))
     app.add_handler(CommandHandler("topskills", cmd_topskills))
