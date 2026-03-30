@@ -156,11 +156,15 @@ Operational diagnosis based on telemetry:
 - `/improve_compare <proposal_id> [window_days]` — before/after metrics (anchored to artifact deployment when available)
 - `/improve_funnel [days]` — end-to-end improvement funnel metrics
 - `/improve_eval_report [days]` — consolidated experiment/evaluation report
+- `/improve_weekly_report [weeks]` — weekly controlled-live trend report
+- `/improve_phase [baseline|improving]` — baseline vs self-improving trial phase
+- `/improve_log_rollback <artifact_id> <reason>` — rollback telemetry logging
 
 ### Promotion policy
 - `/improve_policy [manual|assisted|auto_low]`
 - `/improve_promote <proposal_id> [force]`
 - `/improve_autopromote`
+- In `baseline` eval phase, promotion is blocked unless forced (for controlled comparison).
 
 ### Evolution memory
 - `/evolve_capture <proposal_id>`

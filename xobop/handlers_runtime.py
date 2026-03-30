@@ -99,6 +99,9 @@ async def process_text_message(
     cmd_improve_autopromote,
     cmd_improve_funnel,
     cmd_improve_eval_report,
+    cmd_improve_weekly_report,
+    cmd_improve_phase,
+    cmd_improve_log_rollback,
     cmd_evolve_capture,
     cmd_evolve_memory,
     cmd_panicstatus,
@@ -239,6 +242,18 @@ async def process_text_message(
     if lower.startswith("/improve_eval_report"):
         op_event("route_selected", chat_id=chat_id, route="cmd_improve_eval_report")
         await cmd_improve_eval_report(update)
+        return True
+    if lower.startswith("/improve_weekly_report"):
+        op_event("route_selected", chat_id=chat_id, route="cmd_improve_weekly_report")
+        await cmd_improve_weekly_report(update)
+        return True
+    if lower.startswith("/improve_phase"):
+        op_event("route_selected", chat_id=chat_id, route="cmd_improve_phase")
+        await cmd_improve_phase(update)
+        return True
+    if lower.startswith("/improve_log_rollback"):
+        op_event("route_selected", chat_id=chat_id, route="cmd_improve_log_rollback")
+        await cmd_improve_log_rollback(update)
         return True
     if lower.startswith("/evolve_capture"):
         op_event("route_selected", chat_id=chat_id, route="cmd_evolve_capture")

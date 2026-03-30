@@ -817,6 +817,17 @@ def _get_improve_policy() -> str:
     return p if p in {"manual", "assisted", "auto_low"} else "assisted"
 
 
+def _get_eval_phase() -> str:
+    p = (_get_setting("improve_eval_phase", "baseline") or "baseline").strip().lower()
+    return p if p in {"baseline", "improving"} else "baseline"
+
+
+def _allowed_artifact_families() -> set[str]:
+    raw = (_get_setting("artifact_families_allowed", "alias,retry") or "alias,retry").strip().lower()
+    parts = [x.strip() for x in raw.split(",") if x.strip()]
+    return set(parts or ["alias", "retry"])
+
+
 def _get_exec_retry_limit() -> int:
     raw = (_get_setting("exec_retry_limit", "0") or "0").strip()
     if raw.isdigit():
@@ -2934,6 +2945,10 @@ def _compile_proposal_to_change(proposal_id: int) -> str:
         else:
             return f"⛔ Proposal #{proposal_id} is non-actionable: cannot compile to allowed artifact type."
 
+        family = "alias" if artifact_type == "routing_rule" else ("retry" if artifact_type == "config_change" else "unknown")
+        if family not in _allowed_artifact_families():
+            return f"⛔ Artifact family '{family}' is frozen/disabled by trial scope."
+
         cur = conn.execute(
             """
             INSERT INTO change_artifacts(proposal_id,artifact_type,target,artifact_json,expected_metric,expected_delta,status)
@@ -3379,6 +3394,7 @@ def _promote_proposal_sync(proposal_id: int, force: bool = False) -> str:
     import subprocess
 
     policy = _get_improve_policy()
+    phase = _get_eval_phase()
     with get_db() as conn:
         p = conn.execute(
             "SELECT id,status,risk_level,title FROM improvement_proposals WHERE id=?",
@@ -3389,6 +3405,9 @@ def _promote_proposal_sync(proposal_id: int, force: bool = False) -> str:
 
     if p["status"] in {"promoted", "rejected"}:
         return f"Proposal #{proposal_id} already {p['status']}."
+
+    if phase == "baseline" and not force:
+        return "⛔ Eval phase is baseline: promotion disabled (use force only for emergency)."
 
     art = _latest_artifact_for_proposal(proposal_id)
     if not art:
@@ -3478,7 +3497,7 @@ def _promote_proposal_sync(proposal_id: int, force: bool = False) -> str:
                 proposal_id,
                 json.dumps({"artifact_id": int(art["id"]), "artifact_type": atype, "target": target}),
                 json.dumps({"applied": applied_desc}),
-                f"policy={policy}; risk={risk}; force={int(force)}; artifact_id={int(art['id'])}; commit={commit_hash}",
+                f"policy={policy}; phase={phase}; risk={risk}; force={int(force)}; artifact_id={int(art['id'])}; commit={commit_hash}",
             ),
         )
 
@@ -3670,6 +3689,59 @@ def _improve_funnel_report(days: int = 30) -> str:
         f"• drift_repair_events: {int(drift_repairs)}\n"
         f"• artifact_families: {fam}"
     )
+
+
+def _improve_weekly_report(weeks: int = 4) -> str:
+    w = max(1, min(weeks, 8))
+    lines = [f"Improve weekly report ({w}w) phase={_get_eval_phase()} policy={_get_improve_policy()}"]
+    with get_db() as conn:
+        for i in range(w):
+            end = f"-{7*i} day"
+            start = f"-{7*(i+1)} day"
+            req = conn.execute(
+                "SELECT COUNT(*) AS n FROM op_events WHERE event_type='command_requested' AND timestamp >= datetime('now', ?) AND timestamp < datetime('now', ?)",
+                (start, end),
+            ).fetchone()["n"]
+            fail = conn.execute(
+                "SELECT COUNT(*) AS n FROM op_events WHERE status NOT IN ('ok','skipped') AND timestamp >= datetime('now', ?) AND timestamp < datetime('now', ?)",
+                (start, end),
+            ).fetchone()["n"]
+            unk = conn.execute(
+                "SELECT COUNT(*) AS n FROM op_events WHERE event_type='unknown_command' AND timestamp >= datetime('now', ?) AND timestamp < datetime('now', ?)",
+                (start, end),
+            ).fetchone()["n"]
+            proposals = conn.execute(
+                "SELECT COUNT(*) AS n FROM improvement_proposals WHERE created_ts >= datetime('now', ?) AND created_ts < datetime('now', ?)",
+                (start, end),
+            ).fetchone()["n"]
+            actionable = conn.execute(
+                "SELECT COUNT(DISTINCT proposal_id) AS n FROM change_artifacts WHERE created_ts >= datetime('now', ?) AND created_ts < datetime('now', ?)",
+                (start, end),
+            ).fetchone()["n"]
+            sim_pass = conn.execute(
+                "SELECT COUNT(DISTINCT proposal_id) AS n FROM improvement_runs WHERE phase='simulation' AND status='ok' AND created_ts >= datetime('now', ?) AND created_ts < datetime('now', ?)",
+                (start, end),
+            ).fetchone()["n"]
+            promoted = conn.execute(
+                "SELECT COUNT(DISTINCT proposal_id) AS n FROM improvement_runs WHERE phase='promotion' AND status='ok' AND created_ts >= datetime('now', ?) AND created_ts < datetime('now', ?)",
+                (start, end),
+            ).fetchone()["n"]
+            drift = conn.execute(
+                "SELECT COUNT(*) AS n FROM op_events WHERE event_type='state_repair' AND timestamp >= datetime('now', ?) AND timestamp < datetime('now', ?)",
+                (start, end),
+            ).fetchone()["n"]
+            rollback = conn.execute(
+                "SELECT COUNT(*) AS n FROM op_events WHERE event_type='rollback_event' AND timestamp >= datetime('now', ?) AND timestamp < datetime('now', ?)",
+                (start, end),
+            ).fetchone()["n"]
+
+            fail100 = (100.0 * fail / req) if req else 0.0
+            unk100 = (100.0 * unk / req) if req else 0.0
+            conf = "LOW" if req < 50 else "HIGH"
+            lines.append(
+                f"W-{i+1}: req={int(req)} fail/100={fail100:.2f} unk/100={unk100:.2f} proposals={int(proposals)} actionable={int(actionable)} sim={int(sim_pass)} promoted={int(promoted)} drift={int(drift)} rollback={int(rollback)} conf={conf}"
+            )
+    return "\n".join(lines)
 
 
 def _improve_eval_report(days: int = 30) -> str:
@@ -4384,6 +4456,45 @@ async def cmd_improve_eval_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE
     await _reply(update, _improve_eval_report(days))
 
 
+async def cmd_improve_weekly_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _owner_only(update):
+        return
+    raw = update.message.text.partition(" ")[2].strip()
+    try:
+        weeks = int(raw) if raw else 4
+    except Exception:
+        weeks = 4
+    await _reply(update, _improve_weekly_report(weeks))
+
+
+async def cmd_improve_phase(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _owner_only(update):
+        return
+    raw = update.message.text.partition(" ")[2].strip().lower()
+    if not raw:
+        await _reply(update, f"improve_eval_phase: {_get_eval_phase()}\nUse: `/improve_phase <baseline|improving>`")
+        return
+    if raw not in {"baseline", "improving"}:
+        await _reply(update, "Use: `/improve_phase <baseline|improving>`")
+        return
+    _set_setting("improve_eval_phase", raw)
+    await _reply(update, f"✅ improve_eval_phase set to: {raw}")
+
+
+async def cmd_improve_log_rollback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _owner_only(update):
+        return
+    raw = update.message.text.partition(" ")[2].strip()
+    parts = raw.split(" ", 1)
+    if not parts or not parts[0].isdigit():
+        await _reply(update, "Use: `/improve_log_rollback <artifact_id> <reason>`")
+        return
+    artifact_id = int(parts[0])
+    reason = parts[1].strip() if len(parts) > 1 else ""
+    _record_op_event("rollback_event", chat_id=update.effective_chat.id, route="manual", status="ok", metadata={"artifact_id": artifact_id, "reason": reason})
+    await _reply(update, f"✅ rollback event logged for artifact #{artifact_id}")
+
+
 async def cmd_evolve_capture(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _owner_only(update):
         return
@@ -4770,6 +4881,9 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 /improve_autopromote — auto-promote low-risk proposals (policy=auto_low)
 /improve_funnel [days] — report proposal→artifact→simulation→promotion→impact funnel
 /improve_eval_report [days] — consolidated evaluation report for paper/stability
+/improve_weekly_report [weeks] — weekly trend report (headline metrics + confidence)
+/improve_phase [baseline|improving] — controlled live evaluation phase tag
+/improve_log_rollback <artifact_id> <reason> — log rollback telemetry event
 /evolve_capture <proposal_id> — persist proposal outcome lesson into evolution memory
 /evolve_memory [limit] — show recent evolution memory lessons
 /plan goal — create execution manifest
@@ -4877,6 +4991,9 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             cmd_improve_autopromote=lambda u: cmd_improve_autopromote(u, ctx),
             cmd_improve_funnel=lambda u: cmd_improve_funnel(u, ctx),
             cmd_improve_eval_report=lambda u: cmd_improve_eval_report(u, ctx),
+            cmd_improve_weekly_report=lambda u: cmd_improve_weekly_report(u, ctx),
+            cmd_improve_phase=lambda u: cmd_improve_phase(u, ctx),
+            cmd_improve_log_rollback=lambda u: cmd_improve_log_rollback(u, ctx),
             cmd_evolve_capture=lambda u: cmd_evolve_capture(u, ctx),
             cmd_evolve_memory=lambda u: cmd_evolve_memory(u, ctx),
             cmd_panicstatus=lambda u: cmd_panicstatus(u, ctx),
@@ -5045,6 +5162,9 @@ def main() -> None:
     app.add_handler(CommandHandler("improve_autopromote", cmd_improve_autopromote))
     app.add_handler(CommandHandler("improve_funnel", cmd_improve_funnel))
     app.add_handler(CommandHandler("improve_eval_report", cmd_improve_eval_report))
+    app.add_handler(CommandHandler("improve_weekly_report", cmd_improve_weekly_report))
+    app.add_handler(CommandHandler("improve_phase", cmd_improve_phase))
+    app.add_handler(CommandHandler("improve_log_rollback", cmd_improve_log_rollback))
     app.add_handler(CommandHandler("evolve_capture", cmd_evolve_capture))
     app.add_handler(CommandHandler("evolve_memory", cmd_evolve_memory))
     app.add_handler(CommandHandler("plan", cmd_plan))
