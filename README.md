@@ -118,9 +118,9 @@ DAILY_MEMORY_DIR=/home/xavi/.openclaw/workspace/xobops-test/memory
 ### Memory read path
 
 Per turn in `_run_agent`:
-- build query from user text
-- retrieve semantic memory from `memory_items` + `memory_vectors`
-- inject top results into prompt context
+- build query from current user text + up to the last 3 user turns
+- retrieve top-3 semantic memories from `memory_items` + `memory_vectors`
+- inject retrieved memories into prompt context
 - if embedding path degrades, lexical fallback retrieval is used
 
 ---
@@ -230,3 +230,4 @@ Do **not** copy a live SQLite DB with plain `cp`.
 Use SQLite online backup API / `.backup`.
 
 XoBop includes `db_backup` cron skill for safe online backups.
+Backup filenames include UTC timestamp and git short hash when available.

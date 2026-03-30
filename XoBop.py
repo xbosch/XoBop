@@ -1419,8 +1419,8 @@ def _build_structured_memory_block(query: str) -> str:
     return ("\n\n" + "\n\n".join(parts)) if parts else ""
 
 
-async def _build_memory_block(query: str) -> str:
-    semantic = await _retrieve_memory(query, k=MAX_MEMORY_RESULTS)
+async def _build_memory_block(query: str, k: int = MAX_MEMORY_RESULTS) -> str:
+    semantic = await _retrieve_memory(query, k=k)
     sem_block = ""
     if semantic:
         sem_block = "\n\nRelevant memory:\n" + "\n".join(f"- {m.text}" for m in semantic)
@@ -1664,8 +1664,9 @@ async def _run_cron_job(job_name: str) -> None:
             output = "Memory cleanup completed."
         elif skill_type == "db_backup":
             backup_dir = skill_args.get("backup_dir", str(Path("backups").resolve()))
+            repo_dir = skill_args.get("repo_dir", os.getcwd())
             loop = asyncio.get_running_loop()
-            dst = await loop.run_in_executor(None, lambda: sqlite_online_backup(DB_FILE, backup_dir))
+            dst = await loop.run_in_executor(None, lambda: sqlite_online_backup(DB_FILE, backup_dir, repo_dir=repo_dir))
             output = f"DB backup completed: {dst}"
         else:
             raise ValueError(f"Unknown cron skill_type: {skill_type}")
@@ -1971,7 +1972,12 @@ async def _call_skill(chat_id: int, user_query: str, mode: str, skill_name: str,
 async def _run_agent(chat_id: int, query: str, force: bool = False) -> str:
     mode = _get_mode()
     hist = _get_history(chat_id)
-    memory_block = await _build_memory_block(query)
+
+    # Memory query context: current turn + up to last 3 user turns.
+    prev_user = [m.get("content", "") for m in hist if m.get("role") == "user"][-3:]
+    memory_query = "\n".join([*prev_user, query])
+    memory_block = await _build_memory_block(memory_query, k=min(3, MAX_MEMORY_RESULTS))
+
     tools = _build_tools_from_db(mode)
 
     effective_query = query + (" force" if force and not _user_forced(query) else "")
@@ -2709,7 +2715,10 @@ async def _post_init(app: Application) -> None:
         STATE.pending_action_by_chat = {int(k): v for k, v in pending.items()}
         if STATE.pending_action_by_chat:
             try:
-                await _notify_owner("Resuming pending action state from previous session.")
+                actions = [str(v.get("action", "unknown")) for v in STATE.pending_action_by_chat.values() if isinstance(v, dict)]
+                top = ", ".join(actions[:3]) if actions else "unknown"
+                more = "" if len(actions) <= 3 else f" (+{len(actions)-3} more)"
+                await _notify_owner(f"System restored. Resuming pending task state: {top}{more}.")
             except Exception:
                 pass
 
