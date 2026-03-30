@@ -321,6 +321,9 @@ def _init_db() -> None:
                 created_ts DATETIME DEFAULT CURRENT_TIMESTAMP,
                 phase TEXT NOT NULL,
                 status TEXT NOT NULL,
+                promotion_mode TEXT DEFAULT '',
+                eval_phase TEXT DEFAULT '',
+                reason TEXT DEFAULT '',
                 before_json TEXT DEFAULT '{}',
                 after_json TEXT DEFAULT '{}',
                 notes TEXT DEFAULT ''
@@ -353,6 +356,8 @@ def _init_db() -> None:
                 expected_metric TEXT NOT NULL DEFAULT '',
                 expected_delta REAL,
                 status TEXT NOT NULL DEFAULT 'compiled',
+                promotion_mode TEXT DEFAULT '',
+                eval_phase TEXT DEFAULT '',
                 simulated_ts DATETIME,
                 applied_ts DATETIME,
                 commit_hash TEXT DEFAULT ''
@@ -506,6 +511,16 @@ def _init_db() -> None:
         for col, typ in (("owner_id", "INTEGER"), ("cmd_input", "TEXT"), ("exit_code", "INTEGER")):
             if col not in cols:
                 conn.execute(f"ALTER TABLE skill_audit ADD COLUMN {col} {typ}")
+
+        run_cols = {r['name'] for r in conn.execute("PRAGMA table_info(improvement_runs)").fetchall()}
+        for col, typ in (("promotion_mode", "TEXT"), ("eval_phase", "TEXT"), ("reason", "TEXT")):
+            if col not in run_cols:
+                conn.execute(f"ALTER TABLE improvement_runs ADD COLUMN {col} {typ}")
+
+        art_cols = {r['name'] for r in conn.execute("PRAGMA table_info(change_artifacts)").fetchall()}
+        for col, typ in (("promotion_mode", "TEXT"), ("eval_phase", "TEXT")):
+            if col not in art_cols:
+                conn.execute(f"ALTER TABLE change_artifacts ADD COLUMN {col} {typ}")
     # keep FTS mirror aligned
     with get_db() as conn:
         conn.execute("INSERT INTO memory_items_fts(memory_items_fts) VALUES('rebuild')")
@@ -710,18 +725,19 @@ def _get_mode() -> str:
     return _get_setting("mode", "strict") or "strict"
 
 
-def _runtime_state_payload(*, last_applied_artifact_id: Optional[int] = None) -> dict[str, Any]:
+def _runtime_state_payload(*, last_applied_artifact_id: Optional[int] = None, last_promotion_mode: str = "") -> dict[str, Any]:
     payload = {
         "command_aliases": _get_command_aliases(),
         "exec_retry_limit": _get_exec_retry_limit(),
         "last_applied_artifact_id": int(last_applied_artifact_id or 0),
+        "last_promotion_mode": (last_promotion_mode or ""),
     }
     payload["command_aliases"] = {str(k): str(v) for k, v in sorted(payload["command_aliases"].items())}
     return payload
 
 
-def _export_runtime_snapshot(*, last_applied_artifact_id: Optional[int] = None) -> None:
-    data = _runtime_state_payload(last_applied_artifact_id=last_applied_artifact_id)
+def _export_runtime_snapshot(*, last_applied_artifact_id: Optional[int] = None, last_promotion_mode: str = "") -> None:
+    data = _runtime_state_payload(last_applied_artifact_id=last_applied_artifact_id, last_promotion_mode=last_promotion_mode)
     RUNTIME_SNAPSHOT_FILE.parent.mkdir(parents=True, exist_ok=True)
     RUNTIME_SNAPSHOT_FILE.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
 
@@ -3160,12 +3176,13 @@ def _simulate_proposal_sync(proposal_id: int) -> str:
             after["shell_replay_report"] = shell_replay_report
         cur = conn.execute(
             """
-            INSERT INTO improvement_runs(proposal_id,phase,status,before_json,after_json,notes)
-            VALUES(?, 'simulation', ?, ?, ?, ?)
+            INSERT INTO improvement_runs(proposal_id,phase,status,eval_phase,before_json,after_json,notes)
+            VALUES(?, 'simulation', ?, ?, ?, ?, ?)
             """,
             (
                 proposal_id,
                 "ok" if overall else "error",
+                _get_eval_phase(),
                 json.dumps(before),
                 json.dumps(after),
                 "simulation gate",
@@ -3330,12 +3347,13 @@ def _impact_compare_sync(proposal_id: int, window_days: int = 7) -> str:
 
         conn.execute(
             """
-            INSERT INTO improvement_runs(proposal_id,phase,status,before_json,after_json,notes)
-            VALUES(?, 'impact_compare', ?, ?, ?, ?)
+            INSERT INTO improvement_runs(proposal_id,phase,status,eval_phase,before_json,after_json,notes)
+            VALUES(?, 'impact_compare', ?, ?, ?, ?, ?)
             """,
             (
                 proposal_id,
                 status,
+                _get_eval_phase(),
                 json.dumps(summary.get("before", {})),
                 json.dumps(summary.get("after", {})),
                 f"delta={json.dumps(summary.get('delta', {}))}",
@@ -3390,11 +3408,12 @@ def _latest_impact_delta(proposal_id: int) -> dict[str, float]:
     return {}
 
 
-def _promote_proposal_sync(proposal_id: int, force: bool = False) -> str:
+def _promote_proposal_sync(proposal_id: int, force: bool = False, reason: str = "") -> str:
     import subprocess
 
     policy = _get_improve_policy()
     phase = _get_eval_phase()
+    promotion_mode = "force" if force else "policy"
     with get_db() as conn:
         p = conn.execute(
             "SELECT id,status,risk_level,title FROM improvement_proposals WHERE id=?",
@@ -3405,6 +3424,9 @@ def _promote_proposal_sync(proposal_id: int, force: bool = False) -> str:
 
     if p["status"] in {"promoted", "rejected"}:
         return f"Proposal #{proposal_id} already {p['status']}."
+
+    if force and not (reason or "").strip():
+        return "⛔ Force promotion requires a reason. Use: /improve_promote <id> force <reason>"
 
     if phase == "baseline" and not force:
         return "⛔ Eval phase is baseline: promotion disabled (use force only for emergency)."
@@ -3462,7 +3484,7 @@ def _promote_proposal_sync(proposal_id: int, force: bool = False) -> str:
         return f"⛔ Unsupported artifact scope: {atype}:{target}"
 
     # Export deterministic canonical state snapshot after apply
-    _export_runtime_snapshot(last_applied_artifact_id=int(art["id"]))
+    _export_runtime_snapshot(last_applied_artifact_id=int(art["id"]), last_promotion_mode=promotion_mode)
 
     commit_hash = "unknown"
     repo_dir = Path(__file__).resolve().parent
@@ -3479,22 +3501,38 @@ def _promote_proposal_sync(proposal_id: int, force: bool = False) -> str:
     except Exception:
         pass
 
+    if force:
+        _record_op_event(
+            "force_promotion",
+            route="improve_promote",
+            status="ok",
+            metadata={
+                "proposal_id": proposal_id,
+                "artifact_id": int(art["id"]),
+                "reason": (reason or "unspecified"),
+                "eval_phase": phase,
+            },
+        )
+
     with get_db() as conn:
         conn.execute(
             "UPDATE improvement_proposals SET status='promoted' WHERE id=?",
             (proposal_id,),
         )
         conn.execute(
-            "UPDATE change_artifacts SET status='applied', applied_ts=CURRENT_TIMESTAMP, commit_hash=? WHERE id=?",
-            (commit_hash, int(art["id"])),
+            "UPDATE change_artifacts SET status='applied', applied_ts=CURRENT_TIMESTAMP, commit_hash=?, promotion_mode=?, eval_phase=? WHERE id=?",
+            (commit_hash, promotion_mode, phase, int(art["id"])),
         )
         conn.execute(
             """
-            INSERT INTO improvement_runs(proposal_id,phase,status,before_json,after_json,notes)
-            VALUES(?, 'promotion', 'ok', ?, ?, ?)
+            INSERT INTO improvement_runs(proposal_id,phase,status,promotion_mode,eval_phase,reason,before_json,after_json,notes)
+            VALUES(?, 'promotion', 'ok', ?, ?, ?, ?, ?, ?)
             """,
             (
                 proposal_id,
+                promotion_mode,
+                phase,
+                (reason or ""),
                 json.dumps({"artifact_id": int(art["id"]), "artifact_type": atype, "target": target}),
                 json.dumps({"applied": applied_desc}),
                 f"policy={policy}; phase={phase}; risk={risk}; force={int(force)}; artifact_id={int(art['id'])}; commit={commit_hash}",
@@ -3635,9 +3673,22 @@ def _improve_funnel_report(days: int = 30) -> str:
             "SELECT COUNT(DISTINCT proposal_id) AS n FROM improvement_runs WHERE phase='promotion' AND status='ok' AND created_ts >= datetime('now', ?)",
             (f"-{d} day",),
         ).fetchone()["n"]
+        promoted_force = conn.execute(
+            "SELECT COUNT(DISTINCT proposal_id) AS n FROM improvement_runs WHERE phase='promotion' AND status='ok' AND promotion_mode='force' AND created_ts >= datetime('now', ?)",
+            (f"-{d} day",),
+        ).fetchone()["n"]
+        promoted_auto = max(0, int(promoted or 0) - int(promoted_force or 0))
 
         impact_rows = conn.execute(
-            "SELECT status, notes FROM improvement_runs WHERE phase='impact_compare' AND created_ts >= datetime('now', ?)",
+            """
+            SELECT r.status, r.notes, p.promotion_mode
+            FROM improvement_runs r
+            LEFT JOIN (
+              SELECT proposal_id, MAX(id) AS rid FROM improvement_runs WHERE phase='promotion' AND status='ok' GROUP BY proposal_id
+            ) lp ON lp.proposal_id = r.proposal_id
+            LEFT JOIN improvement_runs p ON p.id = lp.rid
+            WHERE r.phase='impact_compare' AND r.created_ts >= datetime('now', ?)
+            """,
             (f"-{d} day",),
         ).fetchall()
 
@@ -3654,9 +3705,14 @@ def _improve_funnel_report(days: int = 30) -> str:
     positive = 0
     neutral = 0
     negative = 0
+    positive_auto = 0
+    neutral_auto = 0
+    negative_auto = 0
     for r in impact_rows:
         if r["status"] != "ok":
             neutral += 1
+            if (r["promotion_mode"] or "") != "force":
+                neutral_auto += 1
             continue
         note = (r["notes"] or "")
         dlt = {}
@@ -3668,13 +3724,20 @@ def _improve_funnel_report(days: int = 30) -> str:
         fail_delta = float(dlt.get("fail_rate", 0.0)) if isinstance(dlt, dict) else 0.0
         if fail_delta < 0:
             positive += 1
+            if (r["promotion_mode"] or "") != "force":
+                positive_auto += 1
         elif fail_delta > 0:
             negative += 1
+            if (r["promotion_mode"] or "") != "force":
+                negative_auto += 1
         else:
             neutral += 1
+            if (r["promotion_mode"] or "") != "force":
+                neutral_auto += 1
 
     actionable_rate = (100.0 * actionable / generated) if generated else 0.0
     success_rate = (100.0 * positive / promoted) if promoted else 0.0
+    success_rate_auto = (100.0 * positive_auto / promoted_auto) if promoted_auto else 0.0
     fam = ", ".join([f"{r['artifact_type']}={int(r['n'])}" for r in family_rows]) or "none"
     return (
         f"Improve funnel ({d}d)\n"
@@ -3683,11 +3746,17 @@ def _improve_funnel_report(days: int = 30) -> str:
         f"• actionable_yield: {actionable_rate:.1f}%\n"
         f"• artifacts_compiled: {int(artifacts_compiled)}\n"
         f"• simulations_passed: {int(sim_pass)}\n"
-        f"• promotions_applied: {int(promoted)}\n"
-        f"• changes_positive_impact: {int(positive)} (of applied: {success_rate:.1f}%)\n"
-        f"• promotion_effectiveness: {success_rate:.1f}%\n"
-        f"• changes_neutral: {int(neutral)}\n"
-        f"• changes_negative: {int(negative)}\n"
+        f"• promotions_applied_total: {int(promoted)}\n"
+        f"• promotions_auto: {int(promoted_auto)}\n"
+        f"• promotions_force: {int(promoted_force)}\n"
+        f"• force_ratio: {(100.0*promoted_force/promoted if promoted else 0.0):.1f}%\n"
+        f"• changes_positive_impact_all: {int(positive)} (of applied: {success_rate:.1f}%)\n"
+        f"• changes_positive_impact_auto: {int(positive_auto)} (of auto: {success_rate_auto:.1f}%)\n"
+        f"• promotion_effectiveness: {success_rate_auto:.1f}%\n"
+        f"• changes_neutral_all: {int(neutral)}\n"
+        f"• changes_negative_all: {int(negative)}\n"
+        f"• changes_neutral_auto: {int(neutral_auto)}\n"
+        f"• changes_negative_auto: {int(negative_auto)}\n"
         f"• drift_repair_events: {int(drift_repairs)}\n"
         f"• artifact_families: {fam}"
     )
@@ -3728,6 +3797,11 @@ def _improve_weekly_report(weeks: int = 4) -> str:
                 "SELECT COUNT(DISTINCT proposal_id) AS n FROM improvement_runs WHERE phase='promotion' AND status='ok' AND created_ts >= datetime('now', ?) AND created_ts < datetime('now', ?)",
                 (start, end),
             ).fetchone()["n"]
+            promoted_force = conn.execute(
+                "SELECT COUNT(DISTINCT proposal_id) AS n FROM improvement_runs WHERE phase='promotion' AND status='ok' AND promotion_mode='force' AND created_ts >= datetime('now', ?) AND created_ts < datetime('now', ?)",
+                (start, end),
+            ).fetchone()["n"]
+            promoted_auto = max(0, int(promoted or 0) - int(promoted_force or 0))
             drift = conn.execute(
                 "SELECT COUNT(*) AS n FROM op_events WHERE event_type='state_repair' AND timestamp >= datetime('now', ?) AND timestamp < datetime('now', ?)",
                 (start, end),
@@ -3740,15 +3814,28 @@ def _improve_weekly_report(weeks: int = 4) -> str:
             fail100 = (100.0 * fail / req) if req else 0.0
             unk100 = (100.0 * unk / req) if req else 0.0
             conf = "LOW" if req < 50 else "HIGH"
-            lines.append(
-                f"W-{i+1}: req={int(req)} fail/100={fail100:.2f} unk/100={unk100:.2f} proposals={int(proposals)} actionable={int(actionable)} sim={int(sim_pass)} promoted={int(promoted)} drift={int(drift)} rollback={int(rollback)} conf={conf}"
+            force_ratio = (100.0 * promoted_force / promoted) if promoted else 0.0
+            line = (
+                f"W-{i+1}: req={int(req)} fail/100={fail100:.2f} unk/100={unk100:.2f} proposals={int(proposals)} actionable={int(actionable)} sim={int(sim_pass)} "
+                f"promoted_total={int(promoted)} auto={int(promoted_auto)} force={int(promoted_force)} force_ratio={force_ratio:.1f}% drift={int(drift)} rollback={int(rollback)} conf={conf}"
             )
+            if _get_eval_phase() == "baseline" and int(promoted_force) > 3:
+                line += " WARNING: baseline force promotions > 3"
+            lines.append(line)
     return "\n".join(lines)
 
 
 def _improve_eval_report(days: int = 30) -> str:
     d = max(1, min(days, 90))
     with get_db() as conn:
+        promoted_total = conn.execute(
+            "SELECT COUNT(DISTINCT proposal_id) AS n FROM improvement_runs WHERE phase='promotion' AND status='ok' AND created_ts >= datetime('now', ?)",
+            (f"-{d} day",),
+        ).fetchone()["n"]
+        promoted_force = conn.execute(
+            "SELECT COUNT(DISTINCT proposal_id) AS n FROM improvement_runs WHERE phase='promotion' AND status='ok' AND promotion_mode='force' AND created_ts >= datetime('now', ?)",
+            (f"-{d} day",),
+        ).fetchone()["n"]
         non_actionable = conn.execute(
             """
             SELECT COUNT(*) AS n
@@ -3806,11 +3893,13 @@ def _improve_eval_report(days: int = 30) -> str:
     retry_avg_fail = (retry_fail_delta / retry_count) if retry_count else 0.0
     retry_avg_lat = (retry_lat_delta / retry_count) if retry_count else 0.0
 
+    force_dependency = (100.0 * promoted_force / promoted_total) if promoted_total else 0.0
     return (
         f"Improve eval report ({d}d)\n"
         f"{_improve_funnel_report(d)}\n"
         f"---\n"
         f"• non_actionable_proposals: {int(non_actionable)}\n"
+        f"• force_dependency: {force_dependency:.1f}%\n"
         f"• alias_targeted_improved: {alias_improved}\n"
         f"• alias_targeted_regressed: {alias_regressed}\n"
         f"• retry_eval_count: {retry_count}\n"
@@ -4415,16 +4504,26 @@ async def cmd_improve_promote(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
         return
     raw = update.message.text.partition(" ")[2].strip().split()
     if not raw:
-        await _reply(update, "Use: `/improve_promote <proposal_id> [force]`")
+        await _reply(update, "Use: `/improve_promote <proposal_id> [force <reason>]`")
         return
     try:
         pid = int(raw[0])
     except Exception:
-        await _reply(update, "Use: `/improve_promote <proposal_id> [force]`")
+        await _reply(update, "Use: `/improve_promote <proposal_id> [force <reason>]`")
         return
     force = any(x.lower() == "force" for x in raw[1:])
+    reason = ""
+    if force:
+        try:
+            i = next(i for i, x in enumerate(raw[1:], start=1) if x.lower() == "force")
+            reason = " ".join(raw[i+1:]).strip()
+        except Exception:
+            reason = ""
+        if not reason:
+            await _reply(update, "Use: `/improve_promote <proposal_id> force <reason>`")
+            return
     loop = asyncio.get_running_loop()
-    rep = await loop.run_in_executor(None, lambda: _promote_proposal_sync(pid, force))
+    rep = await loop.run_in_executor(None, lambda: _promote_proposal_sync(pid, force, reason))
     await _reply(update, rep)
 
 
@@ -4879,7 +4978,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 /improve_runs [proposal_id] — list recent simulation runs
 /improve_compare <proposal_id> [window_days] — compare before/after impact
 /improve_policy [manual|assisted|auto_low] — set promotion autonomy policy
-/improve_promote <proposal_id> [force] — promote proposal with risk-policy checks
+/improve_promote <proposal_id> [force <reason>] — promote proposal with risk-policy checks
 /improve_autopromote — auto-promote low-risk proposals (policy=auto_low)
 /improve_funnel [days] — report proposal→artifact→simulation→promotion→impact funnel
 /improve_eval_report [days] — consolidated evaluation report for paper/stability

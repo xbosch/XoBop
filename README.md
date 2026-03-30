@@ -105,7 +105,7 @@ flowchart TD
 
 ## Promotion / autonomy policy
 - `/improve_policy [manual|assisted|auto_low]`
-- `/improve_promote <proposal_id> [force]`
+- `/improve_promote <proposal_id> [force <reason>]`
 - `/improve_autopromote`
 
 ## Evaluation (Sprint J/K)
