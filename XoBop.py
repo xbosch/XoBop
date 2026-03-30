@@ -61,18 +61,12 @@ from telegram.ext import (
 )
 
 from xobop.emailer import smtp_send_email
-from xobop.intents import (
-    extract_email_body,
-    extract_git_dir,
-    extract_recipient_email,
-    is_email_intent,
-    is_email_status_intent,
-    refers_to_last_attachment,
-    wants_attachment,
-)
+from xobop.intents import extract_git_dir, refers_to_last_attachment
 from xobop.router import classify
 from xobop.state import STATE
 from xobop.capabilities_fs import count_entries
+from xobop.capabilities_shell import exec_shell_command
+from xobop.workflows import handle_attachment_arrival, handle_email_text
 
 # =============================================================================
 # Logging
@@ -1741,50 +1735,17 @@ async def _exec_file_append(skill: SkillDef, policies: dict, args: dict) -> tupl
 
 
 async def _exec_shell_command(skill: SkillDef, policies: dict, user_query: str, args: dict) -> tuple[str, Optional[int], str, Optional[str]]:
-    command = args["command"].strip()
-    cwd = str(args.get("cwd") or policies.get("default_cwd") or os.getcwd())
-    raw = bool(args.get("raw", False))
-    timeout = int(args.get("timeout_override") or skill.timeout_sec)
-
-    # Normalize common shorthand
-    command = re.sub(r"\bgit\s+(.+?)\s+push\s+force\b", r"git \1 push --force", command)
-
-    policy = _classify_shell(command)
-    allowed_commands = [x.strip() for x in policies.get("allowed_commands", "").split(",") if x.strip()]
-
-    raw_allowed = policies.get("allow_raw_shell", "0") == "1"
-    if raw and not raw_allowed:
-        return "⛔ Raw shell disabled by skill policy.", None, "blocked", None
-    if (skill.requires_force or policy.requires_force or raw) and not _user_forced(user_query):
-        return f"⛔ Blocked ({policy.kind}, raw={raw}). Add 'force' to proceed.\nCommand: {command}", None, "blocked", None
-
-    # Support chained commands without requiring raw shell.
-    # Execute segments sequentially and stop on first non-zero exit.
-    segments = [s.strip() for s in command.split("&&") if s.strip()]
-    if not segments:
-        return "⛔ Empty command.", None, "blocked", None
-
-    outputs = [f"Kind: {policy.kind}", f"CWD: {cwd}"]
-    last_rc: Optional[int] = 0
-    for i, seg in enumerate(segments, start=1):
-        argv = shlex.split(seg) if seg else []
-        if allowed_commands and argv and argv[0] not in allowed_commands:
-            return f"⛔ Command '{argv[0]}' blocked by skill allowlist.", None, "blocked", None
-
-        stdout, stderr, rc = await _run_shell_async(seg, cwd, timeout, raw=False)
-        outputs.append(f"[step {i}] $ {seg}")
-        if stdout.strip():
-            outputs.append(f"STDOUT:\n{stdout.strip()}")
-        if stderr.strip():
-            outputs.append(f"STDERR:\n{stderr.strip()}")
-        outputs.append(f"Exit: {rc}")
-        last_rc = rc
-        if rc != 0:
-            break
-
-    result, artifact = _shorten_or_artifact(skill.name, "\n".join(outputs))
-    status = "ok" if (last_rc == 0) else "error"
-    return result, last_rc, status, artifact
+    return await exec_shell_command(
+        skill_name=skill.name,
+        requires_force=skill.requires_force,
+        policies=policies,
+        user_query=user_query,
+        args=args,
+        classify_shell=_classify_shell,
+        user_forced=_user_forced,
+        run_shell_async=_run_shell_async,
+        shorten_or_artifact=_shorten_or_artifact,
+    )
 
 
 async def _call_skill(chat_id: int, user_query: str, mode: str, skill_name: str, args: dict) -> str:
@@ -2471,25 +2432,24 @@ async def handle_media_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
         await tg_file.download_to_drive(custom_path=str(local_path))
         STATE.last_attachment_by_chat[chat_id] = str(local_path)
 
-        # If we were waiting for an attachment to send an email, complete it now.
-        if chat_id in STATE.pending_action_by_chat:
-            pending = STATE.pending_action_by_chat.pop(chat_id)
-            if pending.get("action") == "send_email":
-                try:
-                    sent = smtp_send_email(
-                        os.getenv("GMAIL_EMAIL") or os.getenv("GMAIL_USER") or "",
-                        os.getenv("GMAIL_APP_PASSWORD") or "",
-                        pending["to"],
-                        pending["subject"],
-                        pending["body"],
-                        str(local_path),
-                    )
-                    STATE.last_email_status_by_chat[chat_id] = sent
-                    await _reply(update, f"Attachment stored: {local_path}\n{sent}")
-                except Exception as exc:
-                    STATE.last_email_status_by_chat[chat_id] = f"EMAIL_FAILED {str(exc)[:180]}"
-                    await _reply(update, f"Attachment stored: {local_path}\n⚠️ Email send failed: {str(exc)[:180]}")
-                return
+        # If this attachment completes a pending workflow, execute it now.
+        req = handle_attachment_arrival(chat_id, str(local_path), STATE)
+        if req:
+            try:
+                sent = smtp_send_email(
+                    os.getenv("GMAIL_EMAIL") or os.getenv("GMAIL_USER") or "",
+                    os.getenv("GMAIL_APP_PASSWORD") or "",
+                    req["to"],
+                    req["subject"],
+                    req["body"],
+                    req["attachment"],
+                )
+                STATE.last_email_status_by_chat[chat_id] = sent
+                await _reply(update, f"Attachment stored: {local_path}\n{sent}")
+            except Exception as exc:
+                STATE.last_email_status_by_chat[chat_id] = f"EMAIL_FAILED {str(exc)[:180]}"
+                await _reply(update, f"Attachment stored: {local_path}\n⚠️ Email send failed: {str(exc)[:180]}")
+            return
 
         await _reply(update, f"Attachment stored: {local_path}")
     except Exception as exc:
@@ -2511,48 +2471,28 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         await _reply(update, "Got it — please send the actual photo/file attachment now.")
         return
 
-    # Deterministic email workflow (generalized, not wife-specific).
-    if is_email_status_intent(text):
-        status = STATE.last_email_status_by_chat.get(chat_id)
-        await _reply(update, status if status else "Not sent yet.")
-        return
-
-    if is_email_intent(text):
-        to_addr = extract_recipient_email(text)
-        if not to_addr:
-            await _reply(update, "Please provide recipient email (or say wife/neri).")
+    # Workflow engine: email send/status (generic pending-action model).
+    wf = handle_email_text(text, chat_id, STATE)
+    if wf.get("handled"):
+        if wf.get("reply"):
+            await _reply(update, wf["reply"])
             return
-
-        body = extract_email_body(text)
-        subject = "Message from Xavi"
-        needs_attachment = wants_attachment(text)
-
-        if needs_attachment and chat_id not in STATE.last_attachment_by_chat:
-            STATE.pending_action_by_chat[chat_id] = {
-                "action": "send_email",
-                "to": to_addr,
-                "subject": subject,
-                "body": body,
-            }
-            await _reply(update, f"Ready to send to {to_addr}. Please attach the file/photo now.")
+        if wf.get("send_now"):
+            try:
+                sent = smtp_send_email(
+                    os.getenv("GMAIL_EMAIL") or os.getenv("GMAIL_USER") or "",
+                    os.getenv("GMAIL_APP_PASSWORD") or "",
+                    wf["to"],
+                    wf["subject"],
+                    wf["body"],
+                    wf.get("attachment"),
+                )
+                STATE.last_email_status_by_chat[chat_id] = sent
+                await _reply(update, sent)
+            except Exception as exc:
+                STATE.last_email_status_by_chat[chat_id] = f"EMAIL_FAILED {str(exc)[:180]}"
+                await _reply(update, f"⚠️ Email send failed: {str(exc)[:180]}")
             return
-
-        try:
-            attachment = STATE.last_attachment_by_chat.get(chat_id) if needs_attachment else None
-            sent = smtp_send_email(
-                os.getenv("GMAIL_EMAIL") or os.getenv("GMAIL_USER") or "",
-                os.getenv("GMAIL_APP_PASSWORD") or "",
-                to_addr,
-                subject,
-                body,
-                attachment,
-            )
-            STATE.last_email_status_by_chat[chat_id] = sent
-            await _reply(update, sent)
-        except Exception as exc:
-            STATE.last_email_status_by_chat[chat_id] = f"EMAIL_FAILED {str(exc)[:180]}"
-            await _reply(update, f"⚠️ Email send failed: {str(exc)[:180]}")
-        return
 
     # Fallback: if Telegram command routing fails, still honor core slash commands.
     # (Useful when bot_command entities are missing or malformed.)

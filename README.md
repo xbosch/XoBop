@@ -76,8 +76,10 @@ xobops-test/
 │   ├── router.py            # Unified action parser/classifier
 │   ├── state.py             # Runtime state store (pending actions, last results)
 │   ├── intents.py           # Intent extraction utilities (email fields, refs)
+│   ├── workflows.py         # Generic workflow engine (pending action progression)
 │   ├── emailer.py           # SMTP email send helper
-│   └── capabilities_fs.py   # Filesystem capabilities (e.g., count entries)
+│   ├── capabilities_fs.py   # Filesystem capabilities (e.g., count entries)
+│   └── capabilities_shell.py# Shell execution capability with unified result contract
 ├── run_test.sh              # Launcher
 ├── .env                     # Secrets (ignored)
 ├── .env.example             # Template
