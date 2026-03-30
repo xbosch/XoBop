@@ -68,3 +68,25 @@ Important optional:
 - `.env.example` — config template
 - `memory_v5.db` — runtime DB (ignored)
 - `artifacts/`, `backups/`, `memory/` — runtime state (ignored)
+
+## Optional static website structure
+
+If you publish a simple static artist site, this structure works well:
+
+```text
+/
+├── index.html            Home
+├── about.html            Artist information
+├── contact.html          Contact and inquiries
+├── css/
+│   └── style.css         Global styles
+├── gallery/
+│   ├── index.html        Gallery overview
+│   ├── olives.html       Olives series
+│   ├── faces.html        Faces series
+│   └── symbols.html      Symbols series
+└── images/
+    ├── olives/
+    ├── faces/
+    └── symbols/
+```
