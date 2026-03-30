@@ -2570,7 +2570,9 @@ def _run_checkup_sync() -> str:
     checks = []
     code_path = Path(__file__).resolve()
     # Pin to project venv explicitly (based on XoBop.py location) to avoid cwd/interpreter drift.
-    venv_python = (code_path.parent / '.venv' / 'bin' / 'python').resolve()
+    # IMPORTANT: do not .resolve() here; many venv python binaries are symlinks to /usr/bin/python,
+    # and resolving would bypass venv context.
+    venv_python = (code_path.parent / '.venv' / 'bin' / 'python')
     checks.append(("venv_python", venv_python.exists()))
     req = Path('requirements.txt').resolve()
     checks.append(("requirements_txt", req.exists()))
@@ -2610,6 +2612,7 @@ def _run_checkup_sync() -> str:
     lines.append(f"• code_path: {code_path}")
     lines.append(f"• git_rev: {git_rev}")
     lines.append(f"• venv_python_path: {venv_python}")
+    lines.append(f"• venv_python_resolved: {venv_python.resolve()}")
     lines.append(f"• pip_check_note: {dep_note}")
     if bad:
         lines.append(f"RESULT: FAIL ({', '.join(bad)})")
