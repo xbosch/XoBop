@@ -129,6 +129,12 @@ Dependency/env drift check with pinned project interpreter context:
 - runtime code path + git revision
 - system pulse checks
 
+### `/state_check`
+Compares canonical runtime snapshot vs DB/settings state and reports drift.
+
+### `/state_repair`
+Repairs DB/settings from canonical runtime snapshot.
+
 ### `/diagnose [days]`
 Operational diagnosis based on telemetry:
 - event/failure summary
@@ -168,6 +174,8 @@ Operational diagnosis based on telemetry:
 - `/exec <command>`
 - `/clearctx`
 - `/topskills`
+- `/state_check`
+- `/state_repair`
 
 ### Cron
 - `/cronadd name | schedule | skill_type | description | args_json`
@@ -227,6 +235,7 @@ Important:
 - `USE_SHELL_REPLAY_CONTROLLER=0` (set to `1` to enable shell-only isolated replay in simulation)
 - `PANIC_UNLOCK_CODE=<high_entropy_secret>`
 - `SELF_MODS_FILE=/home/xavi/.openclaw/workspace/xobops-test/config/self_mods.json`
+- `RUNTIME_SNAPSHOT_FILE=/home/xavi/.openclaw/workspace/xobops-test/state/runtime_settings_snapshot.json`
 - `ALLOWED_WRITE_ROOT=/home/xavi/.openclaw/workspace/xobops-test`
 - `READ_ROOT=/home/xavi/.openclaw/workspace/xobops-test`
 
@@ -261,6 +270,8 @@ xobops-test/
 │   └── build_signals.py
 ├── config/
 │   └── self_mods.json
+├── state/
+│   └── runtime_settings_snapshot.json
 ├── artifacts/
 ├── backups/
 ├── memory/

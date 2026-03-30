@@ -117,6 +117,7 @@ FILE_MEMORY_ROOT = Path(os.getenv("FILE_MEMORY_ROOT", str(ALLOWED_WRITE_ROOT))).
 LONG_MEMORY_FILE = Path(os.getenv("LONG_MEMORY_FILE", str(FILE_MEMORY_ROOT / "MEMORY.md"))).resolve()
 DAILY_MEMORY_DIR = Path(os.getenv("DAILY_MEMORY_DIR", str(FILE_MEMORY_ROOT / "memory"))).resolve()
 SELF_MODS_FILE = Path(os.getenv("SELF_MODS_FILE", str(Path(os.getcwd()) / "config" / "self_mods.json"))).resolve()
+RUNTIME_SNAPSHOT_FILE = Path(os.getenv("RUNTIME_SNAPSHOT_FILE", str(Path(os.getcwd()) / "state" / "runtime_settings_snapshot.json"))).resolve()
 DAILY_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 
 HISTORY_LOAD_LIMIT = 40
@@ -690,6 +691,64 @@ def _set_setting(key: str, value: str) -> None:
 
 def _get_mode() -> str:
     return _get_setting("mode", "strict") or "strict"
+
+
+def _runtime_state_payload(*, last_applied_artifact_id: Optional[int] = None) -> dict[str, Any]:
+    payload = {
+        "command_aliases": _get_command_aliases(),
+        "exec_retry_limit": _get_exec_retry_limit(),
+        "last_applied_artifact_id": int(last_applied_artifact_id or 0),
+    }
+    payload["command_aliases"] = {str(k): str(v) for k, v in sorted(payload["command_aliases"].items())}
+    return payload
+
+
+def _export_runtime_snapshot(*, last_applied_artifact_id: Optional[int] = None) -> None:
+    data = _runtime_state_payload(last_applied_artifact_id=last_applied_artifact_id)
+    RUNTIME_SNAPSHOT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    RUNTIME_SNAPSHOT_FILE.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _load_runtime_snapshot() -> dict[str, Any]:
+    try:
+        if RUNTIME_SNAPSHOT_FILE.exists():
+            d = json.loads(RUNTIME_SNAPSHOT_FILE.read_text(encoding="utf-8"))
+            if isinstance(d, dict):
+                return d
+    except Exception:
+        pass
+    return {}
+
+
+def _state_check_dict() -> dict[str, Any]:
+    snap = _load_runtime_snapshot()
+    db = _runtime_state_payload()
+    mismatched: dict[str, dict[str, Any]] = {}
+    for key in ["command_aliases", "exec_retry_limit"]:
+        if snap.get(key) != db.get(key):
+            mismatched[key] = {"snapshot": snap.get(key), "db": db.get(key)}
+    return {
+        "snapshot_exists": bool(snap),
+        "match": len(mismatched) == 0 and bool(snap),
+        "mismatched": mismatched,
+        "snapshot": snap,
+        "db": db,
+    }
+
+
+def _repair_state_from_snapshot() -> str:
+    snap = _load_runtime_snapshot()
+    if not snap:
+        return "⛔ No runtime snapshot found."
+    aliases = snap.get("command_aliases", {})
+    if isinstance(aliases, dict):
+        _set_command_aliases({str(k): str(v) for k, v in aliases.items()})
+    retry = snap.get("exec_retry_limit", 0)
+    try:
+        _set_exec_retry_limit(int(retry))
+    except Exception:
+        _set_exec_retry_limit(0)
+    return "✅ Runtime settings repaired from snapshot."
 
 
 def _load_self_mods() -> dict[str, Any]:
@@ -3291,14 +3350,16 @@ def _promote_proposal_sync(proposal_id: int, force: bool = False) -> str:
     else:
         return f"⛔ Unsupported artifact scope: {atype}:{target}"
 
+    # Export deterministic canonical state snapshot after apply
+    _export_runtime_snapshot(last_applied_artifact_id=int(art["id"]))
+
     commit_hash = "unknown"
     repo_dir = Path(__file__).resolve().parent
     try:
-        # Try to materialize applied artifact into git-tracked state (self_mods.json)
-        rel = os.path.relpath(str(SELF_MODS_FILE), str(repo_dir))
-        subprocess.run(["git", "-C", str(repo_dir), "add", rel], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        rel_snap = os.path.relpath(str(RUNTIME_SNAPSHOT_FILE), str(repo_dir))
+        subprocess.run(["git", "-C", str(repo_dir), "add", rel_snap], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.run(
-            ["git", "-C", str(repo_dir), "commit", "-m", f"self-mod: apply artifact for proposal #{proposal_id}"],
+            ["git", "-C", str(repo_dir), "commit", "-m", f"self-mod: apply artifact #{int(art['id'])} for proposal #{proposal_id}"],
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -3906,6 +3967,24 @@ async def cmd_health(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await _reply(update, _health_report())
 
 
+async def cmd_state_check(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _owner_only(update):
+        return
+    d = _state_check_dict()
+    if d["match"]:
+        snap = d.get("snapshot", {})
+        await _reply(update, f"State check: ✅ match\nlast_applied_artifact_id: {int(snap.get('last_applied_artifact_id', 0))}")
+        return
+    mism = d.get("mismatched", {})
+    await _reply(update, f"State check: ❌ drift detected\nkeys: {', '.join(mism.keys()) if mism else 'unknown'}\nUse `/state_repair`.")
+
+
+async def cmd_state_repair(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _owner_only(update):
+        return
+    await _reply(update, _repair_state_from_snapshot())
+
+
 async def cmd_diagnose(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _owner_only(update):
         return
@@ -4464,6 +4543,8 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 /status — system status
 /health — health summary
 /checkup — dependency/env drift check
+/state_check — compare canonical runtime snapshot vs DB/settings
+/state_repair — repair DB/settings from runtime snapshot
 /diagnose [days] — ops diagnosis from instrumentation signals
 /improve_propose [days] — generate a data-backed improvement proposal
 /improve_list — list recent improvement proposals
@@ -4568,6 +4649,8 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             cmd_status=lambda u: cmd_status(u, ctx),
             cmd_health=lambda u: cmd_health(u, ctx),
             cmd_checkup=lambda u: cmd_checkup(u, ctx),
+            cmd_state_check=lambda u: cmd_state_check(u, ctx),
+            cmd_state_repair=lambda u: cmd_state_repair(u, ctx),
             cmd_diagnose=lambda u: cmd_diagnose(u, ctx),
             cmd_improve_propose=lambda u: cmd_improve_propose(u, ctx),
             cmd_improve_list=lambda u: cmd_improve_list(u, ctx),
@@ -4660,6 +4743,7 @@ async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def _apply_self_mods_to_runtime() -> None:
+    # Legacy fallback path (pre-snapshot)
     mods = _load_self_mods()
     aliases = mods.get("command_aliases", {}) if isinstance(mods, dict) else {}
     if isinstance(aliases, dict):
@@ -4671,9 +4755,26 @@ def _apply_self_mods_to_runtime() -> None:
         _set_setting("exec_retry_limit", "0")
 
 
+def _startup_reconcile_runtime_state() -> None:
+    snap = _load_runtime_snapshot()
+    if not snap:
+        # No canonical snapshot yet; fall back to legacy file and export a baseline snapshot
+        _apply_self_mods_to_runtime()
+        _export_runtime_snapshot(last_applied_artifact_id=0)
+        return
+
+    check = _state_check_dict()
+    if not check["match"]:
+        # Canonical snapshot is source of truth
+        _repair_state_from_snapshot()
+        _set_setting("runtime_state_drift", json.dumps(check.get("mismatched", {}), sort_keys=True))
+    else:
+        _set_setting("runtime_state_drift", "{}")
+
+
 def main() -> None:
     _init_db()
-    _apply_self_mods_to_runtime()
+    _startup_reconcile_runtime_state()
     if _get_setting("mode") not in MODES:
         _set_setting("mode", DEFAULT_MODE if DEFAULT_MODE in MODES else "strict")
 
@@ -4715,6 +4816,8 @@ def main() -> None:
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("health", cmd_health))
     app.add_handler(CommandHandler("checkup", cmd_checkup))
+    app.add_handler(CommandHandler("state_check", cmd_state_check))
+    app.add_handler(CommandHandler("state_repair", cmd_state_repair))
     app.add_handler(CommandHandler("diagnose", cmd_diagnose))
     app.add_handler(CommandHandler("improve_propose", cmd_improve_propose))
     app.add_handler(CommandHandler("improve_list", cmd_improve_list))

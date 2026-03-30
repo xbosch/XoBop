@@ -84,6 +84,8 @@ async def process_text_message(
     cmd_status,
     cmd_health,
     cmd_checkup,
+    cmd_state_check,
+    cmd_state_repair,
     cmd_diagnose,
     cmd_improve_propose,
     cmd_improve_list,
@@ -176,6 +178,14 @@ async def process_text_message(
     if lower.startswith("/checkup"):
         op_event("health_check", chat_id=chat_id, route="cmd_checkup")
         await cmd_checkup(update)
+        return True
+    if lower.startswith("/state_check"):
+        op_event("route_selected", chat_id=chat_id, route="cmd_state_check")
+        await cmd_state_check(update)
+        return True
+    if lower.startswith("/state_repair"):
+        op_event("route_selected", chat_id=chat_id, route="cmd_state_repair")
+        await cmd_state_repair(update)
         return True
     if lower.startswith("/diagnose"):
         op_event("route_selected", chat_id=chat_id, route="cmd_diagnose")
