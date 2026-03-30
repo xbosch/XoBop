@@ -27,33 +27,35 @@ It is not a generic chatbot. It is a local sovereign ops system with:
 
 ```mermaid
 flowchart TD
-    U[Owner via Telegram] --> T[XoBop.py\nTransport + Command Handlers]
+    U["Owner via Telegram"] --> T["XoBop.py\nTransport + Command Handlers"]
 
-    T --> R[xobop/router.py\nIntent Classification]
-    R --> W[xobop/workflows.py + xobop/state.py\nPending Actions + Runtime State]
-    W --> C[xobop/capabilities_* + emailer + services\nExecution Layer]
+    T --> R["xobop/router.py\nIntent Classification"]
+    R --> W["xobop/workflows.py + xobop/state.py\nPending Actions + Runtime State"]
+    W --> C["xobop/capabilities_* + emailer + services\nExecution Layer"]
 
-    T --> A[_run_agent\nPrompt + Tool Loop]
-    A --> DB[(memory.db)]
-    A --> MEM[memory_items + vectors + FTS]
+    T --> A["_run_agent\nPrompt + Tool Loop"]
+    A --> DB[("memory.db")]
+    A --> MEM["memory_items + vectors + FTS"]
 
-    S[APScheduler] --> CJ[cron_jobs]
-    CJ --> CR[cron_runs]
+    S["APScheduler"] --> CJ["cron_jobs"]
+    CJ --> CR["cron_runs"]
     CJ --> C
 
-    T --> OBS[Observability]
-    OBS --> OPE[op_events]
-    OPE --> SIG[op_signals_daily]
-    SIG --> DIAG[/diagnose]
+    T --> OBS["Observability"]
+    OBS --> OPE["op_events"]
+    OPE --> SIG["op_signals_daily"]
+    SIG --> DIAG["diagnose command"]
 
-    DIAG --> PROP[improvement_proposals]
-    PROP --> SIM[/improve_simulate]
-    SIM --> RUNS[improvement_runs]
-    RUNS --> CMP[/improve_compare]
-    CMP --> PROM[/improve_promote]
-    PROM --> EVO[evolution_memory]
+    DIAG --> PROP["improvement_proposals"]
+    PROP --> COMP["compile to typed artifact"]
+    COMP --> ART["change_artifacts"]
+    ART --> SIM["simulate artifact"]
+    SIM --> RUNS["improvement_runs"]
+    RUNS --> CMP["impact compare"]
+    CMP --> PROM["promote + apply artifact"]
+    PROM --> EVO["evolution_memory"]
 
-    PLOCK[/paniclock] --> SAFE[Panic-lock Gate]
+    PLOCK["panic-lock"] --> SAFE["Panic-lock Gate"]
     SAFE --> C
     SAFE --> CJ
 ```
@@ -62,16 +64,17 @@ flowchart TD
 
 ## Self-Improvement Loop (v1)
 
-XoBop now implements the ordered 8-step loop:
+XoBop now implements the ordered loop:
 
 1. **Instrumentation** (`op_events`)
 2. **Friction metrics** (`op_signals_daily`)
 3. **Diagnosis** (`/diagnose`)
 4. **Proposal generation** (`/improve_propose`)
-5. **Simulation gate** (`/improve_simulate`)
-6. **Impact comparison** (`/improve_compare`)
-7. **Autonomy policy** (`/improve_policy`, `/improve_promote`, `/improve_autopromote`)
-8. **Evolution memory** (`/evolve_capture`, `/evolve_memory`)
+5. **Compile to change artifact** (`/improve_compile`, `change_artifacts`)
+6. **Simulation gate** (`/improve_simulate`)
+7. **Impact comparison** (`/improve_compare`)
+8. **Autonomy policy + controlled apply** (`/improve_policy`, `/improve_promote`, `/improve_autopromote`)
+9. **Evolution memory** (`/evolve_capture`, `/evolve_memory`)
 
 This creates a closed loop:
 **observe → diagnose → propose → simulate → compare → promote safely → remember lesson**
@@ -290,6 +293,6 @@ Use SQLite online backup (`sqlite3.Connection.backup`) / provided backup flow.
 - Shell safety hardening: ✅
 - Drift + system pulse diagnostics: ✅
 - Unknown command feedback path: ✅
-- Closed-loop self-improvement pipeline (A→G): ✅
+- Closed-loop self-improvement pipeline (A→H): ✅
 
 XoBop is now a **high-trust sovereign ops hub** with explicit, testable improvement mechanics.
