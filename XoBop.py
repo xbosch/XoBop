@@ -2594,6 +2594,98 @@ def _diagnose_report(days: int = 7) -> str:
     return "\n".join(lines)
 
 
+def _generate_improvement_proposal(days: int = 7) -> tuple[int, str]:
+    d = max(1, min(days, 30))
+    report = _diagnose_report(d)
+
+    risk = "low"
+    title = "Ops improvement proposal"
+    problem = "General reliability friction detected in recent diagnostics."
+    cause = "Mixed routing/latency/command UX friction."
+    change = "Tune command discoverability and route diagnostics."
+    benefit = "Lower failure/unknown-command rates with stable latency."
+    metric = "failures down; unknown-command count down; p95 latency stable"
+
+    with get_db() as conn:
+        fail_routes = conn.execute(
+            """
+            SELECT COALESCE(route,'') AS route, COUNT(*) AS n
+            FROM op_events
+            WHERE timestamp >= datetime('now', ?)
+              AND status NOT IN ('ok','skipped')
+            GROUP BY COALESCE(route,'')
+            ORDER BY n DESC
+            LIMIT 1
+            """,
+            (f"-{d} day",),
+        ).fetchone()
+        unknown = conn.execute(
+            """
+            SELECT COUNT(*) AS n
+            FROM op_events
+            WHERE timestamp >= datetime('now', ?)
+              AND event_type='unknown_command'
+            """,
+            (f"-{d} day",),
+        ).fetchone()["n"]
+        p95 = conn.execute(
+            """
+            SELECT COALESCE(MAX(p95_latency_ms),0) AS p95
+            FROM op_signals_daily
+            WHERE day >= date('now', ?)
+            """,
+            (f"-{d} day",),
+        ).fetchone()["p95"]
+
+        if int(unknown or 0) >= 3:
+            risk = "low"
+            title = "Reduce unknown command friction"
+            problem = f"Unknown commands observed {int(unknown)} time(s) in last {d} day(s)."
+            cause = "Command discoverability/help text mismatch with user inputs."
+            change = "Add command alias hints and improve unknown-command suggestion mapping."
+            benefit = "Fewer dead-end command attempts and lower correction loops."
+            metric = "unknown_command count reduced by >=50% over next 7 days"
+        elif fail_routes and (fail_routes["route"] or ""):
+            route = fail_routes["route"]
+            risk = "medium" if route in {"run_shell", "cmd_exec"} else "low"
+            title = f"Stabilize failing route: {route}"
+            problem = f"Route '{route}' is top failure source in last {d} day(s)."
+            cause = "Route-specific policy/path/validation friction."
+            change = f"Add pre-validation and clearer blocked/error responses for route '{route}'."
+            benefit = "Lower route failure rate and fewer retries."
+            metric = f"failures on route '{route}' reduced by >=40%"
+        elif float(p95 or 0) > 4000:
+            risk = "medium"
+            title = "Reduce p95 latency pressure"
+            problem = f"Observed p95 latency spike up to {float(p95):.0f}ms."
+            cause = "Tool/LLM path latency accumulation under current flow."
+            change = "Add fast-path short-circuiting for deterministic intents and tighter timeout tiers."
+            benefit = "Improved responsiveness without reducing correctness."
+            metric = "p95 latency < 3000ms while failure rate does not increase"
+
+        cur = conn.execute(
+            """
+            INSERT INTO improvement_proposals
+            (status,risk_level,title,problem_statement,suspected_cause,proposed_change,expected_benefit,metric_target)
+            VALUES ('proposed',?,?,?,?,?,?,?)
+            """,
+            (risk, title, problem, cause, change, benefit, metric),
+        )
+        pid = int(cur.lastrowid)
+
+    out = (
+        f"Proposal #{pid} [{risk}]\n"
+        f"Title: {title}\n"
+        f"Problem: {problem}\n"
+        f"Cause: {cause}\n"
+        f"Change: {change}\n"
+        f"Expected: {benefit}\n"
+        f"Metric target: {metric}\n"
+        f"Source window: last {d} day(s)"
+    )
+    return pid, out
+
+
 def _top_skills(limit: int = 10) -> str:
     with get_db() as conn:
         rows = conn.execute(
@@ -3025,6 +3117,33 @@ async def cmd_diagnose(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await _reply(update, _diagnose_report(days))
 
 
+async def cmd_improve_propose(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _owner_only(update):
+        return
+    raw = update.message.text.partition(" ")[2].strip()
+    try:
+        days = int(raw) if raw else 7
+    except ValueError:
+        days = 7
+    _pid, txt = _generate_improvement_proposal(days)
+    _record_op_event("proposal_generated", chat_id=update.effective_chat.id, route="cmd_improve_propose", status="ok")
+    await _reply(update, txt)
+
+
+async def cmd_improve_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _owner_only(update):
+        return
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id,created_ts,status,risk_level,title FROM improvement_proposals ORDER BY id DESC LIMIT 10"
+        ).fetchall()
+    if not rows:
+        await _reply(update, "No improvement proposals yet.")
+        return
+    lines = [f"#{int(r['id'])} [{r['risk_level']}] {r['status']} — {r['title']} ({r['created_ts']})" for r in rows]
+    await _reply(update, "\n".join(lines))
+
+
 async def cmd_topskills(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if _owner_only(update):
         await _reply(update, _top_skills())
@@ -3372,6 +3491,8 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 /health — health summary
 /checkup — dependency/env drift check
 /diagnose [days] — ops diagnosis from instrumentation signals
+/improve_propose [days] — generate a data-backed improvement proposal
+/improve_list — list recent improvement proposals
 /plan goal — create execution manifest
 /go — execute staged manifest
 /topskills — most used skills
@@ -3457,6 +3578,8 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             cmd_health=lambda u: cmd_health(u, ctx),
             cmd_checkup=lambda u: cmd_checkup(u, ctx),
             cmd_diagnose=lambda u: cmd_diagnose(u, ctx),
+            cmd_improve_propose=lambda u: cmd_improve_propose(u, ctx),
+            cmd_improve_list=lambda u: cmd_improve_list(u, ctx),
             cmd_panicstatus=lambda u: cmd_panicstatus(u, ctx),
             cmd_paniclock=lambda u: cmd_paniclock(u, ctx),
             cmd_panicunlock=lambda u: cmd_panicunlock(u, ctx),
@@ -3577,6 +3700,8 @@ def main() -> None:
     app.add_handler(CommandHandler("health", cmd_health))
     app.add_handler(CommandHandler("checkup", cmd_checkup))
     app.add_handler(CommandHandler("diagnose", cmd_diagnose))
+    app.add_handler(CommandHandler("improve_propose", cmd_improve_propose))
+    app.add_handler(CommandHandler("improve_list", cmd_improve_list))
     app.add_handler(CommandHandler("plan", cmd_plan))
     app.add_handler(CommandHandler("go", cmd_go))
     app.add_handler(CommandHandler("topskills", cmd_topskills))

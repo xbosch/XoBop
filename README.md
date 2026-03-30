@@ -226,7 +226,7 @@ Migration note:
 ## Commands
 
 Core:
-- `/status`, `/health`, `/checkup`, `/diagnose [days]`, `/help`
+- `/status`, `/health`, `/checkup`, `/diagnose [days]`, `/improve_propose [days]`, `/improve_list`, `/help`
 - `/mode`, `/promptshow`, `/promptset`, `/plan`, `/go`
 - `/promptproposal`, `/promptapprove`, `/promptreject`
 - `/exec`
