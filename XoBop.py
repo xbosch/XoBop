@@ -66,6 +66,7 @@ from xobop.capabilities_shell import exec_shell_command
 from xobop.db import db_session, sqlite_online_backup
 from xobop.handlers_runtime import process_media_message, process_text_message
 from xobop.router import classify
+from xobop.shell_facade import get_shell_executor
 
 # =============================================================================
 # Logging
@@ -106,6 +107,7 @@ DEFAULT_MODE = os.getenv("DEFAULT_MODE", "strict").strip().lower()
 ARTIFACT_DIR = Path(os.getenv("ARTIFACT_DIR", "artifacts")).resolve()
 ALLOWED_WRITE_ROOT = Path(os.getenv("ALLOWED_WRITE_ROOT", os.getcwd())).resolve()
 ALLOW_RAW_SHELL = os.getenv("ALLOW_RAW_SHELL", "0").strip() == "1"
+USE_CAPABILITY_FACADE_SHELL = os.getenv("USE_CAPABILITY_FACADE_SHELL", "0").strip() == "1"
 PANIC_UNLOCK_CODE = os.getenv("PANIC_UNLOCK_CODE", "").strip()
 READ_ROOT = Path(os.getenv("READ_ROOT", str(ALLOWED_WRITE_ROOT))).resolve()
 EMBEDDING_FALLBACK = os.getenv("EMBEDDING_FALLBACK", "1").strip() == "1"
@@ -2288,17 +2290,43 @@ async def _exec_file_append(skill: SkillDef, policies: dict, args: dict) -> tupl
 
 
 async def _exec_shell_command(skill: SkillDef, policies: dict, user_query: str, args: dict) -> tuple[str, Optional[int], str, Optional[str]]:
-    return await exec_shell_command(
-        skill_name=skill.name,
-        requires_force=skill.requires_force,
-        policies=policies,
-        user_query=user_query,
-        args=args,
-        classify_shell=_classify_shell,
-        user_forced=_user_forced,
-        run_shell_async=_run_shell_async,
-        shorten_or_artifact=_shorten_or_artifact,
+    async def _legacy_runner(command: str, cwd: Optional[str], timeout: Optional[int], raw: bool) -> tuple[str, Optional[int], str, Optional[str]]:
+        run_args = dict(args)
+        run_args["command"] = command
+        if cwd:
+            run_args["cwd"] = cwd
+        if timeout is not None:
+            run_args["timeout_override"] = int(timeout)
+        run_args["raw"] = bool(raw)
+        return await exec_shell_command(
+            skill_name=skill.name,
+            requires_force=skill.requires_force,
+            policies=policies,
+            user_query=user_query,
+            args=run_args,
+            classify_shell=_classify_shell,
+            user_forced=_user_forced,
+            run_shell_async=_run_shell_async,
+            shorten_or_artifact=_shorten_or_artifact,
+        )
+
+    if not USE_CAPABILITY_FACADE_SHELL:
+        return await _legacy_runner(
+            str(args.get("command", "")),
+            args.get("cwd"),
+            args.get("timeout_override"),
+            bool(args.get("raw", False)),
+        )
+
+    shell = get_shell_executor(mode="live", legacy_runner=_legacy_runner)
+    cap = await shell.run(
+        command=str(args.get("command", "")),
+        cwd=args.get("cwd"),
+        timeout=(int(args.get("timeout_override")) if args.get("timeout_override") is not None else None),
+        raw=bool(args.get("raw", False)),
     )
+    # Facade live output preserves legacy tuple format for compatibility.
+    return cap.output
 
 
 async def _call_skill(chat_id: int, user_query: str, mode: str, skill_name: str, args: dict) -> str:

@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
 
 from xobop.capabilities_shell import exec_shell_command
 from xobop.router import classify
+from xobop.shell_facade import LiveShellExecutor, SimShellExecutor
 
 
 @dataclass
@@ -142,6 +143,58 @@ async def test_shell_write_root_gate(r: Runner) -> None:
     assert_true(r.shell_calls == before, "write-root blocked command should not execute")
 
 
+class _Manifest:
+    def __init__(self) -> None:
+        self.entries = []
+
+    def record(self, effect: dict) -> None:
+        self.entries.append(dict(effect))
+
+
+async def test_facade_live_safe_exec() -> None:
+    async def legacy_runner(command, cwd, timeout, raw):
+        return f"ok:{command}", 0, "ok", None
+
+    ex = LiveShellExecutor(legacy_runner=legacy_runner, manifest_recorder=_Manifest())
+    res = await ex.run("ls", cwd=str(ROOT), timeout=10, raw=False)
+    assert_true(res.ok, "live facade should succeed on safe command")
+
+
+async def test_facade_sim_blocked_command() -> None:
+    m = _Manifest()
+    ex = SimShellExecutor(manifest_recorder=m, command_policy_checker=lambda _c: {"ok": False, "reason": "blocked"})
+    res = await ex.run("rm -rf /", cwd=str(ROOT))
+    assert_true(not res.ok, "sim facade should report blocked command")
+
+
+async def test_facade_sim_parse_invalid() -> None:
+    ex = SimShellExecutor(manifest_recorder=_Manifest(), command_policy_checker=lambda _c: {"ok": True})
+    res = await ex.run("echo 'unterminated", cwd=str(ROOT))
+    assert_true(not res.ok and "parse failed" in (res.error or ""), "invalid parse should fail in sim")
+
+
+async def test_facade_manifest_recorded() -> None:
+    m = _Manifest()
+    ex = SimShellExecutor(manifest_recorder=m, command_policy_checker=lambda _c: {"ok": True})
+    await ex.run("ls", cwd=str(ROOT))
+    assert_true(len(m.entries) == 1 and m.entries[0].get("type") == "shell_run", "manifest should record shell intent")
+
+
+async def test_facade_sim_never_executes_real() -> None:
+    calls = {"n": 0}
+
+    async def legacy_runner(command, cwd, timeout, raw):
+        calls["n"] += 1
+        return "ok", 0, "ok", None
+
+    live = LiveShellExecutor(legacy_runner=legacy_runner, manifest_recorder=_Manifest())
+    sim = SimShellExecutor(manifest_recorder=_Manifest(), command_policy_checker=lambda _c: {"ok": True})
+    await sim.run("ls", cwd=str(ROOT))
+    assert_true(calls["n"] == 0, "sim path must not invoke live execution")
+    await live.run("ls", cwd=str(ROOT))
+    assert_true(calls["n"] == 1, "live path should invoke legacy runner")
+
+
 def main() -> int:
     r = Runner()
 
@@ -150,6 +203,11 @@ def main() -> int:
     r.run("shell.force_gate", lambda: asyncio.run(test_shell_force_gate(r)))
     r.run("shell.allowlist_block", lambda: asyncio.run(test_shell_allowlist_block(r)))
     r.run("shell.write_root_gate", lambda: asyncio.run(test_shell_write_root_gate(r)))
+    r.run("facade.live.safe_exec", lambda: asyncio.run(test_facade_live_safe_exec()))
+    r.run("facade.sim.blocked", lambda: asyncio.run(test_facade_sim_blocked_command()))
+    r.run("facade.sim.parse_invalid", lambda: asyncio.run(test_facade_sim_parse_invalid()))
+    r.run("facade.sim.manifest", lambda: asyncio.run(test_facade_manifest_recorded()))
+    r.run("facade.sim.no_live_exec", lambda: asyncio.run(test_facade_sim_never_executes_real()))
 
     print("---")
     print(f"TOTAL: {r.total}")

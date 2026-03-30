@@ -223,6 +223,7 @@ Important:
 - `MODEL=gpt-4.1-mini`
 - `EMBEDDING_MODEL=text-embedding-3-small`
 - `ALLOW_RAW_SHELL=0`
+- `USE_CAPABILITY_FACADE_SHELL=0` (migration flag; set to `1` to enable shell facade path)
 - `PANIC_UNLOCK_CODE=<high_entropy_secret>`
 - `SELF_MODS_FILE=/home/xavi/.openclaw/workspace/xobops-test/config/self_mods.json`
 - `ALLOWED_WRITE_ROOT=/home/xavi/.openclaw/workspace/xobops-test`
@@ -245,6 +246,7 @@ xobops-test/
 │   ├── capabilities_fs.py
 │   ├── capabilities_shell.py
 │   ├── services.py
+│   ├── shell_facade.py
 │   └── handlers_runtime.py
 ├── scripts/
 │   ├── smoke_test.sh
