@@ -52,8 +52,10 @@ def main() -> int:
 
     for i, (cmd, must) in enumerate(TESTS, start=1):
         before = db_max_id()
-        print(f"\n[{i}/{len(TESTS)}] Send this in Telegram:")
-        print(f"  {cmd}")
+        if not cmd.strip():
+            print(f"FAIL {i}: empty command in TESTS")
+            return 1
+        print(f"\n[{i}/{len(TESTS)}] Send this in Telegram: {cmd!r}")
         input("After sending it, press Enter here to verify...")
         try:
             reply = wait_reply(before)
