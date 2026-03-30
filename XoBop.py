@@ -2784,6 +2784,106 @@ def _simulate_proposal_sync(proposal_id: int) -> str:
     return "\n".join(lines)
 
 
+def _impact_compare_sync(proposal_id: int, window_days: int = 7) -> str:
+    w = max(1, min(window_days, 30))
+    with get_db() as conn:
+        p = conn.execute(
+            "SELECT id,created_ts,title,risk_level FROM improvement_proposals WHERE id=?",
+            (proposal_id,),
+        ).fetchone()
+        if not p:
+            raise ValueError(f"Proposal not found: {proposal_id}")
+
+        ts = p["created_ts"]
+
+        before = conn.execute(
+            """
+            SELECT
+              COUNT(*) AS events,
+              SUM(CASE WHEN status NOT IN ('ok','skipped') THEN 1 ELSE 0 END) AS failures,
+              SUM(CASE WHEN event_type='unknown_command' THEN 1 ELSE 0 END) AS unknowns,
+              AVG(CASE WHEN latency_ms IS NOT NULL AND latency_ms>0 THEN latency_ms END) AS avg_latency
+            FROM op_events
+            WHERE timestamp >= datetime(?, ?)
+              AND timestamp < datetime(?)
+            """,
+            (ts, f"-{w} day", ts),
+        ).fetchone()
+
+        after = conn.execute(
+            """
+            SELECT
+              COUNT(*) AS events,
+              SUM(CASE WHEN status NOT IN ('ok','skipped') THEN 1 ELSE 0 END) AS failures,
+              SUM(CASE WHEN event_type='unknown_command' THEN 1 ELSE 0 END) AS unknowns,
+              AVG(CASE WHEN latency_ms IS NOT NULL AND latency_ms>0 THEN latency_ms END) AS avg_latency
+            FROM op_events
+            WHERE timestamp >= datetime(?)
+              AND timestamp < datetime(?, ?)
+            """,
+            (ts, ts, f"+{w} day"),
+        ).fetchone()
+
+        def _num(row, key):
+            v = row[key]
+            return float(v) if v is not None else 0.0
+
+        b_events = _num(before, "events")
+        a_events = _num(after, "events")
+        b_fail = _num(before, "failures")
+        a_fail = _num(after, "failures")
+        b_unk = _num(before, "unknowns")
+        a_unk = _num(after, "unknowns")
+        b_lat = _num(before, "avg_latency")
+        a_lat = _num(after, "avg_latency")
+
+        b_rate = (100.0 * b_fail / b_events) if b_events else 0.0
+        a_rate = (100.0 * a_fail / a_events) if a_events else 0.0
+
+        delta_fail_rate = a_rate - b_rate
+        delta_unknown = a_unk - b_unk
+        delta_lat = a_lat - b_lat
+
+        summary = {
+            "window_days": w,
+            "before": {"events": b_events, "fail_rate": b_rate, "unknowns": b_unk, "avg_latency": b_lat},
+            "after": {"events": a_events, "fail_rate": a_rate, "unknowns": a_unk, "avg_latency": a_lat},
+            "delta": {"fail_rate": delta_fail_rate, "unknowns": delta_unknown, "avg_latency": delta_lat},
+        }
+
+        status = "ok"
+        if a_events <= 0:
+            status = "insufficient"
+
+        conn.execute(
+            """
+            INSERT INTO improvement_runs(proposal_id,phase,status,before_json,after_json,notes)
+            VALUES(?, 'impact_compare', ?, ?, ?, ?)
+            """,
+            (
+                proposal_id,
+                status,
+                json.dumps(summary.get("before", {})),
+                json.dumps(summary.get("after", {})),
+                f"delta={json.dumps(summary.get('delta', {}))}",
+            ),
+        )
+
+    lines = [
+        f"Impact compare for proposal #{proposal_id} (window={w}d)",
+        f"Title: {p['title']} [{p['risk_level']}]",
+        f"Before: events={int(b_events)} fail_rate={b_rate:.1f}% unknown={int(b_unk)} avg_lat={b_lat:.1f}ms",
+        f"After:  events={int(a_events)} fail_rate={a_rate:.1f}% unknown={int(a_unk)} avg_lat={a_lat:.1f}ms",
+        f"Delta:  fail_rate={delta_fail_rate:+.1f}pp unknown={delta_unknown:+.0f} avg_lat={delta_lat:+.1f}ms",
+    ]
+    if a_events <= 0:
+        lines.append("Assessment: insufficient post-proposal data yet.")
+    else:
+        improved = (delta_fail_rate <= 0.0) and (delta_unknown <= 0.0)
+        lines.append(f"Assessment: {'improved' if improved else 'mixed/regressed'}")
+    return "\n".join(lines)
+
+
 def _top_skills(limit: int = 10) -> str:
     with get_db() as conn:
         rows = conn.execute(
@@ -3282,6 +3382,24 @@ async def cmd_improve_runs(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
     await _reply(update, "\n".join(lines))
 
 
+async def cmd_improve_compare(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _owner_only(update):
+        return
+    raw = update.message.text.partition(" ")[2].strip().split()
+    if not raw:
+        await _reply(update, "Use: `/improve_compare <proposal_id> [window_days]`")
+        return
+    try:
+        proposal_id = int(raw[0])
+        window = int(raw[1]) if len(raw) > 1 else 7
+    except Exception:
+        await _reply(update, "Use: `/improve_compare <proposal_id> [window_days]`")
+        return
+    loop = asyncio.get_running_loop()
+    rep = await loop.run_in_executor(None, lambda: _impact_compare_sync(proposal_id, window))
+    await _reply(update, rep)
+
+
 async def cmd_topskills(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if _owner_only(update):
         await _reply(update, _top_skills())
@@ -3633,6 +3751,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 /improve_list — list recent improvement proposals
 /improve_simulate <proposal_id> — run simulation gate for a proposal
 /improve_runs [proposal_id] — list recent simulation runs
+/improve_compare <proposal_id> [window_days] — compare before/after impact
 /plan goal — create execution manifest
 /go — execute staged manifest
 /topskills — most used skills
@@ -3722,6 +3841,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             cmd_improve_list=lambda u: cmd_improve_list(u, ctx),
             cmd_improve_simulate=lambda u: cmd_improve_simulate(u, ctx),
             cmd_improve_runs=lambda u: cmd_improve_runs(u, ctx),
+            cmd_improve_compare=lambda u: cmd_improve_compare(u, ctx),
             cmd_panicstatus=lambda u: cmd_panicstatus(u, ctx),
             cmd_paniclock=lambda u: cmd_paniclock(u, ctx),
             cmd_panicunlock=lambda u: cmd_panicunlock(u, ctx),
@@ -3846,6 +3966,7 @@ def main() -> None:
     app.add_handler(CommandHandler("improve_list", cmd_improve_list))
     app.add_handler(CommandHandler("improve_simulate", cmd_improve_simulate))
     app.add_handler(CommandHandler("improve_runs", cmd_improve_runs))
+    app.add_handler(CommandHandler("improve_compare", cmd_improve_compare))
     app.add_handler(CommandHandler("plan", cmd_plan))
     app.add_handler(CommandHandler("go", cmd_go))
     app.add_handler(CommandHandler("topskills", cmd_topskills))
