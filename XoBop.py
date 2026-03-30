@@ -320,6 +320,17 @@ def _init_db() -> None:
                 notes TEXT DEFAULT ''
             );
 
+            CREATE TABLE IF NOT EXISTS evolution_memory (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_ts DATETIME DEFAULT CURRENT_TIMESTAMP,
+                proposal_id INTEGER,
+                signature TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                lesson TEXT NOT NULL,
+                evidence_json TEXT DEFAULT '{}'
+            );
+            CREATE INDEX IF NOT EXISTS idx_evolution_memory_sig ON evolution_memory(signature, created_ts);
+
             CREATE TABLE IF NOT EXISTS skills (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
@@ -2975,6 +2986,77 @@ def _auto_promote_low_sync() -> str:
     return f"Auto-promotion complete: promoted={promoted} blocked={blocked}"
 
 
+def _capture_evolution_memory_sync(proposal_id: int) -> str:
+    with get_db() as conn:
+        p = conn.execute(
+            "SELECT id,title,risk_level,status,problem_statement,suspected_cause,metric_target FROM improvement_proposals WHERE id=?",
+            (proposal_id,),
+        ).fetchone()
+        if not p:
+            raise ValueError(f"Proposal not found: {proposal_id}")
+
+        runs = conn.execute(
+            "SELECT phase,status,notes,created_ts FROM improvement_runs WHERE proposal_id=? ORDER BY id ASC",
+            (proposal_id,),
+        ).fetchall()
+
+        sim = [r for r in runs if r["phase"] == "simulation"]
+        imp = [r for r in runs if r["phase"] == "impact_compare"]
+        promo = [r for r in runs if r["phase"] == "promotion"]
+
+        sim_ok = any(r["status"] == "ok" for r in sim)
+        imp_err = any(r["status"] == "error" for r in imp)
+        promoted = any(r["status"] == "ok" for r in promo) or p["status"] == "promoted"
+
+        outcome = "promoted" if promoted else ("regressed" if imp_err else ("sim_pass" if sim_ok else "proposed"))
+        signature = f"risk:{p['risk_level']}|outcome:{outcome}"
+
+        if imp_err:
+            lesson = "Impact comparison showed regression; require stronger guardrails or rollback before promotion."
+        elif sim_ok and not promoted:
+            lesson = "Simulation passed but proposal not promoted; policy/risk gate intentionally held rollout."
+        elif promoted:
+            lesson = "Proposal cleared simulation/policy and was promoted; reuse this change pattern when similar diagnostics recur."
+        else:
+            lesson = "Proposal is still in analysis stage; gather more telemetry before action."
+
+        evidence = {
+            "title": p["title"],
+            "risk_level": p["risk_level"],
+            "status": p["status"],
+            "problem": p["problem_statement"],
+            "cause": p["suspected_cause"],
+            "metric_target": p["metric_target"],
+            "run_count": len(runs),
+        }
+
+        conn.execute(
+            """
+            INSERT INTO evolution_memory(proposal_id,signature,outcome,lesson,evidence_json)
+            VALUES(?,?,?,?,?)
+            """,
+            (proposal_id, signature, outcome, lesson, json.dumps(evidence)),
+        )
+
+    return f"Evolution memory captured for proposal #{proposal_id}: {signature}"
+
+
+def _evolution_memory_report(limit: int = 10) -> str:
+    n = max(1, min(limit, 30))
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id,created_ts,proposal_id,signature,outcome,lesson FROM evolution_memory ORDER BY id DESC LIMIT ?",
+            (n,),
+        ).fetchall()
+    if not rows:
+        return "No evolution memory entries yet."
+    lines = []
+    for r in rows:
+        lines.append(f"#{int(r['id'])} p#{int(r['proposal_id'] or 0)} {r['signature']} [{r['outcome']}]")
+        lines.append(f"  {r['lesson']}")
+    return "\n".join(lines)
+
+
 def _top_skills(limit: int = 10) -> str:
     with get_db() as conn:
         rows = conn.execute(
@@ -3531,6 +3613,31 @@ async def cmd_improve_autopromote(update: Update, ctx: ContextTypes.DEFAULT_TYPE
     await _reply(update, rep)
 
 
+async def cmd_evolve_capture(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _owner_only(update):
+        return
+    raw = update.message.text.partition(" ")[2].strip()
+    try:
+        pid = int(raw)
+    except Exception:
+        await _reply(update, "Use: `/evolve_capture <proposal_id>`")
+        return
+    loop = asyncio.get_running_loop()
+    rep = await loop.run_in_executor(None, lambda: _capture_evolution_memory_sync(pid))
+    await _reply(update, rep)
+
+
+async def cmd_evolve_memory(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _owner_only(update):
+        return
+    raw = update.message.text.partition(" ")[2].strip()
+    try:
+        limit = int(raw) if raw else 10
+    except Exception:
+        limit = 10
+    await _reply(update, _evolution_memory_report(limit))
+
+
 async def cmd_topskills(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if _owner_only(update):
         await _reply(update, _top_skills())
@@ -3886,6 +3993,8 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 /improve_policy [manual|assisted|auto_low] — set promotion autonomy policy
 /improve_promote <proposal_id> [force] — promote proposal with risk-policy checks
 /improve_autopromote — auto-promote low-risk proposals (policy=auto_low)
+/evolve_capture <proposal_id> — persist proposal outcome lesson into evolution memory
+/evolve_memory [limit] — show recent evolution memory lessons
 /plan goal — create execution manifest
 /go — execute staged manifest
 /topskills — most used skills
@@ -3979,6 +4088,8 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             cmd_improve_policy=lambda u: cmd_improve_policy(u, ctx),
             cmd_improve_promote=lambda u: cmd_improve_promote(u, ctx),
             cmd_improve_autopromote=lambda u: cmd_improve_autopromote(u, ctx),
+            cmd_evolve_capture=lambda u: cmd_evolve_capture(u, ctx),
+            cmd_evolve_memory=lambda u: cmd_evolve_memory(u, ctx),
             cmd_panicstatus=lambda u: cmd_panicstatus(u, ctx),
             cmd_paniclock=lambda u: cmd_paniclock(u, ctx),
             cmd_panicunlock=lambda u: cmd_panicunlock(u, ctx),
@@ -4107,6 +4218,8 @@ def main() -> None:
     app.add_handler(CommandHandler("improve_policy", cmd_improve_policy))
     app.add_handler(CommandHandler("improve_promote", cmd_improve_promote))
     app.add_handler(CommandHandler("improve_autopromote", cmd_improve_autopromote))
+    app.add_handler(CommandHandler("evolve_capture", cmd_evolve_capture))
+    app.add_handler(CommandHandler("evolve_memory", cmd_evolve_memory))
     app.add_handler(CommandHandler("plan", cmd_plan))
     app.add_handler(CommandHandler("go", cmd_go))
     app.add_handler(CommandHandler("topskills", cmd_topskills))
