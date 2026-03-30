@@ -75,11 +75,13 @@ xobops-test/
 ├── xobop/
 │   ├── router.py            # Unified action parser/classifier
 │   ├── state.py             # Runtime state store (pending actions, last results)
+│   ├── db.py                # SQLite session helper (WAL/busy_timeout/commit-rollback)
 │   ├── intents.py           # Intent extraction utilities (email fields, refs)
 │   ├── workflows.py         # Generic workflow engine (pending action progression)
 │   ├── emailer.py           # SMTP email send helper
 │   ├── capabilities_fs.py   # Filesystem capabilities (e.g., count entries)
-│   └── capabilities_shell.py# Shell execution capability with unified result contract
+│   ├── capabilities_shell.py# Shell execution capability with unified result contract
+│   └── services.py          # Intent service adapters (download/shell/git flows)
 ├── run_test.sh              # Launcher
 ├── .env                     # Secrets (ignored)
 ├── .env.example             # Template

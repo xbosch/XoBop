@@ -33,7 +33,6 @@ import sqlite3
 import time
 import uuid
 from collections import Counter
-from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -61,12 +60,13 @@ from telegram.ext import (
 )
 
 from xobop.emailer import smtp_send_email
-from xobop.intents import extract_git_dir, refers_to_last_attachment
+from xobop.intents import refers_to_last_attachment
 from xobop.router import classify
 from xobop.state import STATE
-from xobop.capabilities_fs import count_entries
 from xobop.capabilities_shell import exec_shell_command
 from xobop.workflows import handle_attachment_arrival, handle_email_text
+from xobop.db import db_session
+from xobop.services import run_direct_shell, run_download_count, run_execute_last, run_git_commit_push
 
 # =============================================================================
 # Logging
@@ -213,20 +213,8 @@ class MemoryItem:
 # Database
 # =============================================================================
 
-@contextmanager
 def get_db():
-    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-    conn.row_factory = sqlite3.Row
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+    return db_session(DB_FILE)
 
 
 def _init_db() -> None:
@@ -2533,44 +2521,55 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     if intent["name"] == "download_count":
         await update.message.chat.send_action(ChatAction.TYPING)
         try:
-            n = count_entries('/home/xavi/Downloads')
-            await _reply(update, f"You have {n} files in Downloads.")
+            await run_download_count(lambda m: _reply(update, m))
         except Exception as exc:
             log.exception("download-count intent failed")
             await _reply(update, f"⚠️ Error: {str(exc)[:200]}")
         return
 
     if intent["name"] == "git_commit_push" and chat_id in STATE.last_exec_by_chat:
-        prev = STATE.last_exec_by_chat[chat_id]
-        git_dir = extract_git_dir(prev) or os.getcwd()
-        cmd = f"git -C {git_dir} add -A && git -C {git_dir} commit -m \"Update via XoBop\" && git -C {git_dir} push"
-        STATE.last_exec_by_chat[chat_id] = cmd
         await update.message.chat.send_action(ChatAction.TYPING)
         try:
-            result = await _call_skill(chat_id, text + " force", _get_mode(), "run_shell", {"command": cmd})
-            await _reply(update, result)
+            await run_git_commit_push(
+                text=text,
+                chat_id=chat_id,
+                state=STATE,
+                call_skill=_call_skill,
+                mode_getter=_get_mode,
+                reply=lambda m: _reply(update, m),
+            )
         except Exception as exc:
             log.exception("git commit/push intent fallback error")
             await _reply(update, f"⚠️ Error: {str(exc)[:200]}")
         return
 
     if intent["name"] == "execute_last" and chat_id in STATE.last_exec_by_chat:
-        cmd = STATE.last_exec_by_chat[chat_id]
         await update.message.chat.send_action(ChatAction.TYPING)
         try:
-            result = await _call_skill(chat_id, text + " force", _get_mode(), "run_shell", {"command": cmd})
-            await _reply(update, result)
+            await run_execute_last(
+                text=text,
+                chat_id=chat_id,
+                state=STATE,
+                call_skill=_call_skill,
+                mode_getter=_get_mode,
+                reply=lambda m: _reply(update, m),
+            )
         except Exception as exc:
             log.exception("execute-last fallback error")
             await _reply(update, f"⚠️ Error: {str(exc)[:200]}")
         return
 
     if intent["name"] == "direct_shell":
-        STATE.last_exec_by_chat[chat_id] = text
         await update.message.chat.send_action(ChatAction.TYPING)
         try:
-            result = await _call_skill(chat_id, text, _get_mode(), "run_shell", {"command": text})
-            await _reply(update, result)
+            await run_direct_shell(
+                text=text,
+                chat_id=chat_id,
+                state=STATE,
+                call_skill=_call_skill,
+                mode_getter=_get_mode,
+                reply=lambda m: _reply(update, m),
+            )
         except Exception as exc:
             log.exception("Direct shell fallback error")
             await _reply(update, f"⚠️ Error: {str(exc)[:200]}")
