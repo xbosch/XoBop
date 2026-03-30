@@ -2568,8 +2568,8 @@ async def cmd_promptreject(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
 def _run_checkup_sync() -> str:
     import subprocess
     checks = []
-    import sys
-    venv_python = Path(sys.executable).resolve()
+    # Pin to project venv explicitly to avoid interpreter drift.
+    venv_python = (Path(os.getcwd()) / '.venv' / 'bin' / 'python').resolve()
     checks.append(("venv_python", venv_python.exists()))
     req = Path('requirements.txt').resolve()
     checks.append(("requirements_txt", req.exists()))
@@ -2600,6 +2600,7 @@ def _run_checkup_sync() -> str:
 
     bad = [name for name, ok in checks if not ok]
     lines = [f"• {name}: {'✅' if ok else '❌'}" for name, ok in checks]
+    lines.append(f"• venv_python_path: {venv_python}")
     lines.append(f"• pip_check_note: {dep_note}")
     if bad:
         lines.append(f"RESULT: FAIL ({', '.join(bad)})")
