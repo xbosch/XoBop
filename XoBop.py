@@ -59,14 +59,10 @@ from telegram.ext import (
     filters,
 )
 
-from xobop.emailer import smtp_send_email
-from xobop.intents import refers_to_last_attachment
-from xobop.router import classify
 from xobop.state import STATE
 from xobop.capabilities_shell import exec_shell_command
-from xobop.workflows import handle_attachment_arrival, handle_email_text
 from xobop.db import db_session
-from xobop.services import run_direct_shell, run_download_count, run_execute_last, run_git_commit_push
+from xobop.handlers_runtime import process_media_message, process_text_message
 
 # =============================================================================
 # Logging
@@ -2392,207 +2388,38 @@ Schedule: cron syntax or natural language like every day at 9am
 
 
 async def handle_media_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
-    msg = update.message
-    if not msg:
-        return
-    chat_id = update.effective_chat.id
-
-    media_obj = None
-    suffix = ""
-    if msg.photo:
-        media_obj = msg.photo[-1]
-        suffix = ".jpg"
-    elif msg.document:
-        media_obj = msg.document
-        name = msg.document.file_name or ""
-        suffix = Path(name).suffix or ""
-    if not media_obj:
-        return
-
-    try:
-        tg_file = await media_obj.get_file()
-        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        inbox = Path(ARTIFACT_DIR) / "inbox"
-        inbox.mkdir(parents=True, exist_ok=True)
-        local_path = inbox / f"chat{chat_id}_{ts}{suffix}"
-        await tg_file.download_to_drive(custom_path=str(local_path))
-        STATE.last_attachment_by_chat[chat_id] = str(local_path)
-
-        # If this attachment completes a pending workflow, execute it now.
-        req = handle_attachment_arrival(chat_id, str(local_path), STATE)
-        if req:
-            try:
-                sent = smtp_send_email(
-                    os.getenv("GMAIL_EMAIL") or os.getenv("GMAIL_USER") or "",
-                    os.getenv("GMAIL_APP_PASSWORD") or "",
-                    req["to"],
-                    req["subject"],
-                    req["body"],
-                    req["attachment"],
-                )
-                STATE.last_email_status_by_chat[chat_id] = sent
-                await _reply(update, f"Attachment stored: {local_path}\n{sent}")
-            except Exception as exc:
-                STATE.last_email_status_by_chat[chat_id] = f"EMAIL_FAILED {str(exc)[:180]}"
-                await _reply(update, f"Attachment stored: {local_path}\n⚠️ Email send failed: {str(exc)[:180]}")
-            return
-
-        await _reply(update, f"Attachment stored: {local_path}")
-    except Exception as exc:
-        log.exception("Failed to download attachment")
-        await _reply(update, f"⚠️ Could not store attachment: {str(exc)[:200]}")
+    await process_media_message(
+        update=update,
+        state=STATE,
+        artifact_dir=str(ARTIFACT_DIR),
+        owner_only=_owner_only,
+        reply=_reply,
+        log=log,
+    )
 
 
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
     text = (update.message.text or "").strip()
     chat_id = update.effective_chat.id
 
-    if refers_to_last_attachment(text) and chat_id in STATE.last_attachment_by_chat:
-        text = f"{text}\n\nUse this local attachment path: {STATE.last_attachment_by_chat[chat_id]}"
-
-    # If waiting for attachment, avoid LLM drift on helper text like "this is the photo".
-    if chat_id in STATE.pending_action_by_chat and refers_to_last_attachment(text) and chat_id not in STATE.last_attachment_by_chat:
-        await _reply(update, "Got it — please send the actual photo/file attachment now.")
-        return
-
-    # Workflow engine: email send/status (generic pending-action model).
-    wf = handle_email_text(text, chat_id, STATE)
-    if wf.get("handled"):
-        if wf.get("reply"):
-            await _reply(update, wf["reply"])
-            return
-        if wf.get("send_now"):
-            try:
-                sent = smtp_send_email(
-                    os.getenv("GMAIL_EMAIL") or os.getenv("GMAIL_USER") or "",
-                    os.getenv("GMAIL_APP_PASSWORD") or "",
-                    wf["to"],
-                    wf["subject"],
-                    wf["body"],
-                    wf.get("attachment"),
-                )
-                STATE.last_email_status_by_chat[chat_id] = sent
-                await _reply(update, sent)
-            except Exception as exc:
-                STATE.last_email_status_by_chat[chat_id] = f"EMAIL_FAILED {str(exc)[:180]}"
-                await _reply(update, f"⚠️ Email send failed: {str(exc)[:180]}")
-            return
-
-    # Fallback: if Telegram command routing fails, still honor core slash commands.
-    # (Useful when bot_command entities are missing or malformed.)
-    lower = text.lower()
-    if lower.startswith("/exec "):
-        cmd = text[6:].strip()
-        if not cmd:
-            await _reply(update, "Use: `/exec <command>`")
-            return
-        STATE.last_exec_by_chat[chat_id] = cmd
-        await update.message.chat.send_action(ChatAction.TYPING)
-        try:
-            result = await _call_skill(chat_id, text, _get_mode(), "run_shell", {"command": cmd})
-            await _reply(update, result)
-        except Exception as exc:
-            log.exception("/exec fallback error")
-            await _reply(update, f"⚠️ Error: {str(exc)[:200]}")
-        return
-    if lower.startswith("/cronadd "):
-        await cmd_cronadd(update, ctx)
-        return
-    if lower.startswith("/cronlist"):
-        await cmd_cronlist(update, ctx)
-        return
-    if lower.startswith("/cronrun "):
-        await cmd_cronrun(update, ctx)
-        return
-    if lower.startswith("/cronruns "):
-        await cmd_cronruns(update, ctx)
-        return
-
-    intent = classify(text)
-
-    if intent["name"] == "cron_list":
-        await _reply(update, _list_cron_jobs())
-        return
-
-    if intent["name"] == "download_count":
-        await update.message.chat.send_action(ChatAction.TYPING)
-        try:
-            await run_download_count(lambda m: _reply(update, m))
-        except Exception as exc:
-            log.exception("download-count intent failed")
-            await _reply(update, f"⚠️ Error: {str(exc)[:200]}")
-        return
-
-    if intent["name"] == "git_commit_push" and chat_id in STATE.last_exec_by_chat:
-        await update.message.chat.send_action(ChatAction.TYPING)
-        try:
-            await run_git_commit_push(
-                text=text,
-                chat_id=chat_id,
-                state=STATE,
-                call_skill=_call_skill,
-                mode_getter=_get_mode,
-                reply=lambda m: _reply(update, m),
-            )
-        except Exception as exc:
-            log.exception("git commit/push intent fallback error")
-            await _reply(update, f"⚠️ Error: {str(exc)[:200]}")
-        return
-
-    if intent["name"] == "execute_last" and chat_id in STATE.last_exec_by_chat:
-        await update.message.chat.send_action(ChatAction.TYPING)
-        try:
-            await run_execute_last(
-                text=text,
-                chat_id=chat_id,
-                state=STATE,
-                call_skill=_call_skill,
-                mode_getter=_get_mode,
-                reply=lambda m: _reply(update, m),
-            )
-        except Exception as exc:
-            log.exception("execute-last fallback error")
-            await _reply(update, f"⚠️ Error: {str(exc)[:200]}")
-        return
-
-    if intent["name"] == "direct_shell":
-        await update.message.chat.send_action(ChatAction.TYPING)
-        try:
-            await run_direct_shell(
-                text=text,
-                chat_id=chat_id,
-                state=STATE,
-                call_skill=_call_skill,
-                mode_getter=_get_mode,
-                reply=lambda m: _reply(update, m),
-            )
-        except Exception as exc:
-            log.exception("Direct shell fallback error")
-            await _reply(update, f"⚠️ Error: {str(exc)[:200]}")
-        return
-
-    # Safety fallback for direct git command if router misses.
-    if text.lower().startswith("git "):
-        STATE.last_exec_by_chat[chat_id] = text
-        await update.message.chat.send_action(ChatAction.TYPING)
-        try:
-            result = await _call_skill(chat_id, text, _get_mode(), "run_shell", {"command": text})
-            await _reply(update, result)
-        except Exception as exc:
-            log.exception("Direct git fallback error")
-            await _reply(update, f"⚠️ Error: {str(exc)[:200]}")
-        return
-
-    # NOTE: embedded slash-command guard removed due false positives on normal text.
-
-    await update.message.chat.send_action(ChatAction.TYPING)
     try:
-        result = await _run_agent(chat_id, text)
-        await _reply(update, result)
+        await process_text_message(
+            update=update,
+            text=text,
+            chat_id=chat_id,
+            state=STATE,
+            reply=_reply,
+            call_skill=_call_skill,
+            mode_getter=_get_mode,
+            list_cron_jobs=_list_cron_jobs,
+            run_agent=_run_agent,
+            owner_only=_owner_only,
+            cmd_cronadd=lambda u: cmd_cronadd(u, ctx),
+            cmd_cronlist=lambda u: cmd_cronlist(u, ctx),
+            cmd_cronrun=lambda u: cmd_cronrun(u, ctx),
+            cmd_cronruns=lambda u: cmd_cronruns(u, ctx),
+            log=log,
+        )
     except Exception as exc:
         log.exception("Handler error")
         await _reply(update, f"⚠️ Error: {str(exc)[:200]}")

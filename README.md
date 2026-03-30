@@ -81,7 +81,8 @@ xobops-test/
 │   ├── emailer.py           # SMTP email send helper
 │   ├── capabilities_fs.py   # Filesystem capabilities (e.g., count entries)
 │   ├── capabilities_shell.py# Shell execution capability with unified result contract
-│   └── services.py          # Intent service adapters (download/shell/git flows)
+│   ├── services.py          # Intent service adapters (download/shell/git flows)
+│   └── handlers_runtime.py  # Transport-agnostic message/media processing routines
 ├── run_test.sh              # Launcher
 ├── .env                     # Secrets (ignored)
 ├── .env.example             # Template
