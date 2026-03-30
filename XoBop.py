@@ -1026,6 +1026,7 @@ async def _run_shell_async(command: str, cwd: str, timeout: int, raw: bool) -> t
 # =============================================================================
 
 history_by_chat: dict[int, list[dict[str, str]]] = {}
+last_exec_by_chat: dict[int, str] = {}
 
 
 def _load_recent_history(chat_id: int, limit: int = HISTORY_LOAD_LIMIT) -> list[dict[str, str]]:
@@ -2172,12 +2173,19 @@ async def cmd_memdel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_exec(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _owner_only(update):
         return
+    chat_id = update.effective_chat.id
     command = update.message.text.partition(" ")[2].strip()
     if not command:
         await _reply(update, "Use: `/exec <command>`")
         return
-    result = await _run_agent(update.effective_chat.id, command)
-    await _reply(update, result)
+    last_exec_by_chat[chat_id] = command
+    await update.message.chat.send_action(ChatAction.TYPING)
+    try:
+        result = await _call_skill(chat_id, update.message.text, _get_mode(), "run_shell", {"command": command})
+        await _reply(update, result)
+    except Exception as exc:
+        log.exception("cmd_exec failed")
+        await _reply(update, f"⚠️ Error: {str(exc)[:200]}")
 
 
 async def cmd_skills(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2406,6 +2414,15 @@ Schedule: cron syntax or natural language like every day at 9am
 """)
 
 
+def _is_direct_shell_intent(text: str) -> bool:
+    return bool(re.match(r"^(git|python3|sqlite3|ls|pwd|whoami|cat|cp|mv|mkdir|rm|find|grep|sed|awk|ps|top|du|df|systemctl|journalctl)\b", text, re.I))
+
+
+def _is_execute_last_intent(text: str) -> bool:
+    t = text.strip().lower()
+    return t in {"do it", "run it", "execute", "execute it", "yes do it", "please do it"}
+
+
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _owner_only(update):
         return
@@ -2415,12 +2432,36 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     # Fallback: if Telegram command routing fails, still honor /exec directly.
     # (Useful when bot_command entities are missing or malformed.)
     if text.lower().startswith("/exec "):
-        await cmd_exec(update, ctx)
+        cmd = text[6:].strip()
+        if not cmd:
+            await _reply(update, "Use: `/exec <command>`")
+            return
+        last_exec_by_chat[chat_id] = cmd
+        await update.message.chat.send_action(ChatAction.TYPING)
+        try:
+            result = await _call_skill(chat_id, text, _get_mode(), "run_shell", {"command": cmd})
+            await _reply(update, result)
+        except Exception as exc:
+            log.exception("/exec fallback error")
+            await _reply(update, f"⚠️ Error: {str(exc)[:200]}")
+        return
+
+    # Natural-language confirmation for last executable command.
+    if _is_execute_last_intent(text) and chat_id in last_exec_by_chat:
+        cmd = last_exec_by_chat[chat_id]
+        await update.message.chat.send_action(ChatAction.TYPING)
+        try:
+            result = await _call_skill(chat_id, text + " force", _get_mode(), "run_shell", {"command": cmd})
+            await _reply(update, result)
+        except Exception as exc:
+            log.exception("execute-last fallback error")
+            await _reply(update, f"⚠️ Error: {str(exc)[:200]}")
         return
 
     # Convenience fallback: allow direct shell-like one-liners (e.g., "git -C ... status")
     # without forcing users to type /exec every time.
-    if re.match(r"^(git|python3|sqlite3|ls|pwd|whoami|cat|cp|mv|mkdir)\b", text, re.I):
+    if _is_direct_shell_intent(text):
+        last_exec_by_chat[chat_id] = text
         await update.message.chat.send_action(ChatAction.TYPING)
         try:
             result = await _call_skill(chat_id, text, _get_mode(), "run_shell", {"command": text})
