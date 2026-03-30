@@ -437,6 +437,32 @@ def _init_db() -> None:
                 "{}",
             ),
         )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO cron_jobs (name,description,cron_expr,skill_type,skill_args,enabled,alert_owner,updated_ts)
+            VALUES (?,?,?,?,?,1,1,CURRENT_TIMESTAMP)
+            """,
+            (
+                "checkup-monthly",
+                "Monthly environment/dependency check",
+                "0 10 1 * *",
+                "checkup",
+                "{}",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO cron_jobs (name,description,cron_expr,skill_type,skill_args,enabled,alert_owner,updated_ts)
+            VALUES (?,?,?,?,?,1,1,CURRENT_TIMESTAMP)
+            """,
+            (
+                "system-map-weekly",
+                "Weekly self-documentation refresh",
+                "30 9 * * 1",
+                "system_map_refresh",
+                "{}",
+            ),
+        )
 
 
 # =============================================================================
@@ -1741,6 +1767,13 @@ async def _run_cron_job(job_name: str) -> None:
             global _prompt_proposal
             _prompt_proposal = {"mode": "strict", "text": proposal}
             output = "Prompt proposal generated and staged. Use /promptapprove or /promptreject."
+        elif skill_type == "checkup":
+            loop = asyncio.get_running_loop()
+            output = await loop.run_in_executor(None, _run_checkup_sync)
+        elif skill_type == "system_map_refresh":
+            loop = asyncio.get_running_loop()
+            path = await loop.run_in_executor(None, _generate_system_map_sync)
+            output = f"SYSTEM_MAP refreshed: {path}"
         else:
             raise ValueError(f"Unknown cron skill_type: {skill_type}")
     except Exception as exc:
@@ -2480,6 +2513,100 @@ async def cmd_promptreject(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
     await _reply(update, "✅ Prompt proposal discarded.")
 
 
+def _run_checkup_sync() -> str:
+    import subprocess
+    checks = []
+    venv_python = Path('.venv/bin/python').resolve()
+    checks.append(("venv_python", venv_python.exists()))
+    req = Path('requirements.txt').resolve()
+    checks.append(("requirements_txt", req.exists()))
+    for key in ["TELEGRAM_TOKEN", "OPENAI_API_KEY", "OWNER_ID", "DB_FILE"]:
+        checks.append((f"env_{key}", bool(os.getenv(key))))
+    # lightweight dependency check
+    dep_ok = True
+    dep_note = "ok"
+    if venv_python.exists() and req.exists():
+        try:
+            out = subprocess.check_output([str(venv_python), "-m", "pip", "check"], text=True, stderr=subprocess.STDOUT, timeout=20)
+            dep_ok = ("No broken requirements found" in out) or (out.strip() == "")
+            dep_note = out.strip()[:180] or "ok"
+        except Exception as exc:
+            dep_ok = False
+            dep_note = str(exc)[:180]
+    checks.append(("pip_check", dep_ok))
+
+    bad = [name for name, ok in checks if not ok]
+    lines = [f"• {name}: {'✅' if ok else '❌'}" for name, ok in checks]
+    lines.append(f"• pip_check_note: {dep_note}")
+    if bad:
+        lines.append(f"RESULT: FAIL ({', '.join(bad)})")
+    else:
+        lines.append("RESULT: PASS")
+    return "\n".join(lines)
+
+
+def _generate_system_map_sync() -> str:
+    root = Path(os.getcwd())
+    out = root / 'memory' / 'SYSTEM_MAP.md'
+    out.parent.mkdir(parents=True, exist_ok=True)
+    files = sorted([str(p.relative_to(root)) for p in (root / 'xobop').glob('*.py')])
+    body = [
+        "# SYSTEM_MAP.md",
+        "",
+        "Auto-generated architecture snapshot.",
+        "",
+        "## Modules",
+        *[f"- `{f}`" for f in files],
+        "",
+        "## Entry",
+        "- `XoBop.py`",
+    ]
+    out.write_text("\n".join(body), encoding='utf-8')
+    return str(out)
+
+
+async def cmd_checkup(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _owner_only(update):
+        return
+    loop = asyncio.get_running_loop()
+    rep = await loop.run_in_executor(None, _run_checkup_sync)
+    await _reply(update, rep)
+
+
+async def cmd_plan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _owner_only(update):
+        return
+    chat_id = update.effective_chat.id
+    goal = update.message.text.partition(" ")[2].strip()
+    if not goal:
+        await _reply(update, "Use: `/plan <goal>`")
+        return
+    # deterministic simple manifest scaffold
+    steps = [
+        "1) Discover relevant files/resources",
+        "2) Run analysis/execution command",
+        "3) Validate output",
+        "4) Report concise result",
+    ]
+    STATE.planned_manifest_by_chat[chat_id] = {"goal": goal, "steps": steps}
+    await _reply(update, "Planned manifest:\n" + "\n".join(steps) + "\nReply `/go` to execute.")
+
+
+async def cmd_go(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _owner_only(update):
+        return
+    chat_id = update.effective_chat.id
+    plan = STATE.planned_manifest_by_chat.get(chat_id)
+    if not plan:
+        await _reply(update, "No pending plan. Use `/plan <goal>` first.")
+        return
+    goal = plan.get("goal", "")
+    # execute through agent with explicit imperative
+    result = await _run_agent(chat_id, f"Execute this plan now: {goal}", force=True)
+    STATE.planned_manifest_by_chat.pop(chat_id, None)
+    await _reply(update, result)
+
+
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _owner_only(update):
         return
@@ -2779,6 +2906,9 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 /quietflush — flush queued notifications now
 /status — system status
 /health — health summary
+/checkup — dependency/env drift check
+/plan goal — create execution manifest
+/go — execute staged manifest
 /topskills — most used skills
 /clearctx — clear conversation context
 /exec command — run through agent
@@ -2797,7 +2927,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 /cronrun name — run now
 /cronruns name [limit] — recent runs
 
-Cron skill_types: run_shell, browse_page, read_file, write_file, append_file, agent, memory_cleanup, db_backup, prompt_review
+Cron skill_types: run_shell, browse_page, read_file, write_file, append_file, agent, memory_cleanup, db_backup, prompt_review, checkup, system_map_refresh
 Schedule: cron syntax or natural language like every day at 9am
 """)
 
@@ -2948,6 +3078,9 @@ def main() -> None:
     app.add_handler(CommandHandler("quietflush", cmd_quietflush))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("health", cmd_health))
+    app.add_handler(CommandHandler("checkup", cmd_checkup))
+    app.add_handler(CommandHandler("plan", cmd_plan))
+    app.add_handler(CommandHandler("go", cmd_go))
     app.add_handler(CommandHandler("topskills", cmd_topskills))
     app.add_handler(CommandHandler("exec", cmd_exec))
     app.add_handler(CommandHandler("skills", cmd_skills))

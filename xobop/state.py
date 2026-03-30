@@ -12,6 +12,7 @@ class RuntimeState:
     last_attachment_by_chat: Dict[int, str] = field(default_factory=dict)
     pending_action_by_chat: Dict[int, dict] = field(default_factory=dict)
     last_email_status_by_chat: Dict[int, str] = field(default_factory=dict)
+    planned_manifest_by_chat: Dict[int, dict] = field(default_factory=dict)
 
 
 STATE = RuntimeState()
