@@ -320,6 +320,22 @@ def _init_db() -> None:
                 notes TEXT DEFAULT ''
             );
 
+            CREATE TABLE IF NOT EXISTS change_artifacts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                proposal_id INTEGER NOT NULL,
+                created_ts DATETIME DEFAULT CURRENT_TIMESTAMP,
+                artifact_type TEXT NOT NULL,
+                target TEXT NOT NULL,
+                artifact_json TEXT NOT NULL,
+                expected_metric TEXT NOT NULL DEFAULT '',
+                expected_delta REAL,
+                status TEXT NOT NULL DEFAULT 'compiled',
+                simulated_ts DATETIME,
+                applied_ts DATETIME,
+                commit_hash TEXT DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_change_artifacts_proposal ON change_artifacts(proposal_id, id);
+
             CREATE TABLE IF NOT EXISTS evolution_memory (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 created_ts DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -669,6 +685,22 @@ def _set_setting(key: str, value: str) -> None:
 
 def _get_mode() -> str:
     return _get_setting("mode", "strict") or "strict"
+
+
+def _get_command_aliases() -> dict[str, str]:
+    raw = (_get_setting("command_aliases_json", "{}") or "{}").strip()
+    try:
+        d = json.loads(raw)
+        if isinstance(d, dict):
+            return {str(k).strip().lower(): str(v).strip().lower() for k, v in d.items() if str(k).strip() and str(v).strip()}
+    except Exception:
+        pass
+    return {}
+
+
+def _set_command_aliases(d: dict[str, str]) -> None:
+    clean = {str(k).strip().lower(): str(v).strip().lower() for k, v in d.items() if str(k).strip() and str(v).strip()}
+    _set_setting("command_aliases_json", json.dumps(clean, sort_keys=True))
 
 
 def _overseer_enabled() -> bool:
@@ -2703,6 +2735,71 @@ def _generate_improvement_proposal(days: int = 7) -> tuple[int, str]:
     return pid, out
 
 
+def _latest_artifact_for_proposal(proposal_id: int) -> Optional[sqlite3.Row]:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM change_artifacts WHERE proposal_id=? ORDER BY id DESC LIMIT 1",
+            (proposal_id,),
+        ).fetchone()
+    return row
+
+
+def _compile_proposal_to_change(proposal_id: int) -> str:
+    with get_db() as conn:
+        p = conn.execute(
+            "SELECT id,title,problem_statement,suspected_cause,proposed_change,metric_target FROM improvement_proposals WHERE id=?",
+            (proposal_id,),
+        ).fetchone()
+        if not p:
+            raise ValueError(f"Proposal not found: {proposal_id}")
+
+        text = " ".join([
+            str(p["title"] or ""),
+            str(p["problem_statement"] or ""),
+            str(p["suspected_cause"] or ""),
+            str(p["proposed_change"] or ""),
+            str(p["metric_target"] or ""),
+        ]).lower()
+
+        artifact_type = ""
+        target = ""
+        artifact: dict[str, Any] = {}
+        expected_metric = ""
+        expected_delta = None
+
+        if "unknown command" in text or "alias" in text or "discoverability" in text:
+            artifact_type = "routing_rule"
+            target = "unknown_command_handler"
+            aliases = _get_command_aliases()
+            # Safe starter alias set (extensible later)
+            aliases.setdefault("cronru", "cronrun")
+            aliases.setdefault("statu", "status")
+            artifact = {"add_alias": aliases}
+            expected_metric = "unknown_command_rate"
+            expected_delta = -0.15
+        elif "retry" in text or "latency" in text or "timeout" in text:
+            artifact_type = "config_change"
+            target = "runtime_retry_policy"
+            cur = int((_get_setting("exec_retry_limit", "0") or "0").strip() or 0)
+            new_val = max(0, min(3, cur + 1))
+            artifact = {"key": "exec_retry_limit", "value": str(new_val)}
+            expected_metric = "failure_rate"
+            expected_delta = -0.10
+        else:
+            return f"⛔ Proposal #{proposal_id} is non-actionable: cannot compile to allowed artifact type."
+
+        cur = conn.execute(
+            """
+            INSERT INTO change_artifacts(proposal_id,artifact_type,target,artifact_json,expected_metric,expected_delta,status)
+            VALUES(?,?,?,?,?,?,'compiled')
+            """,
+            (proposal_id, artifact_type, target, json.dumps(artifact), expected_metric, expected_delta),
+        )
+        aid = int(cur.lastrowid)
+
+    return f"Artifact #{aid} compiled for proposal #{proposal_id}: {artifact_type} -> {target}"
+
+
 def _simulate_proposal_sync(proposal_id: int) -> str:
     import subprocess
 
@@ -2713,6 +2810,36 @@ def _simulate_proposal_sync(proposal_id: int) -> str:
         py = Path(sys.executable)
 
     checks: list[tuple[str, bool, str]] = []
+
+    art = _latest_artifact_for_proposal(proposal_id)
+    if not art:
+        return "⛔ No compiled artifact for this proposal. Run /improve_compile <proposal_id> first."
+
+    # 0) artifact validation gate (typed, safe scope)
+    art_ok = True
+    art_note = "ok"
+    try:
+        ajson = json.loads(art["artifact_json"] or "{}")
+        atype = (art["artifact_type"] or "").strip()
+        target = (art["target"] or "").strip()
+        if atype == "routing_rule" and target == "unknown_command_handler":
+            aliases = (ajson or {}).get("add_alias", {})
+            art_ok = isinstance(aliases, dict) and all(bool(str(k).strip()) and bool(str(v).strip()) for k, v in aliases.items())
+            if not art_ok:
+                art_note = "invalid alias map"
+        elif atype == "config_change" and target == "runtime_retry_policy":
+            key = (ajson or {}).get("key")
+            val = (ajson or {}).get("value")
+            art_ok = (key == "exec_retry_limit") and str(val).isdigit() and (0 <= int(val) <= 3)
+            if not art_ok:
+                art_note = "invalid retry policy artifact"
+        else:
+            art_ok = False
+            art_note = f"unsupported artifact scope: {atype}:{target}"
+    except Exception as exc:
+        art_ok = False
+        art_note = str(exc)[:300]
+    checks.append(("artifact_validation", art_ok, art_note))
 
     # 1) compile gate
     try:
@@ -2770,13 +2897,17 @@ def _simulate_proposal_sync(proposal_id: int) -> str:
     overall = all(ok for _, ok, _ in checks)
 
     with get_db() as conn:
+        conn.execute(
+            "UPDATE change_artifacts SET status=?, simulated_ts=CURRENT_TIMESTAMP WHERE id=?",
+            ("sim_pass" if overall else "sim_fail", int(art["id"])),
+        )
         row = conn.execute(
             "SELECT risk_level,title FROM improvement_proposals WHERE id=?",
             (proposal_id,),
         ).fetchone()
         if not row:
             raise ValueError(f"Proposal not found: {proposal_id}")
-        before = {"proposal_id": proposal_id, "risk_level": row["risk_level"], "title": row["title"]}
+        before = {"proposal_id": proposal_id, "risk_level": row["risk_level"], "title": row["title"], "artifact_id": int(art["id"]), "artifact_type": art["artifact_type"]}
         after = {k: {"ok": ok, "note": note} for k, ok, note in checks}
         conn.execute(
             """
@@ -2811,6 +2942,12 @@ def _impact_compare_sync(proposal_id: int, window_days: int = 7) -> str:
             raise ValueError(f"Proposal not found: {proposal_id}")
 
         ts = p["created_ts"]
+        a = conn.execute(
+            "SELECT id,applied_ts,commit_hash FROM change_artifacts WHERE proposal_id=? AND applied_ts IS NOT NULL ORDER BY id DESC LIMIT 1",
+            (proposal_id,),
+        ).fetchone()
+        if a and a["applied_ts"]:
+            ts = a["applied_ts"]
 
         before = conn.execute(
             """
@@ -2888,6 +3025,7 @@ def _impact_compare_sync(proposal_id: int, window_days: int = 7) -> str:
     lines = [
         f"Impact compare for proposal #{proposal_id} (window={w}d)",
         f"Title: {p['title']} [{p['risk_level']}]",
+        f"Anchor: {'artifact deployment' if (a and a['applied_ts']) else 'proposal creation'} @ {ts}",
         f"Before: events={int(b_events)} fail_rate={b_rate:.1f}% unknown={int(b_unk)} avg_lat={b_lat:.1f}ms",
         f"After:  events={int(a_events)} fail_rate={a_rate:.1f}% unknown={int(a_unk)} avg_lat={a_lat:.1f}ms",
         f"Delta:  fail_rate={delta_fail_rate:+.1f}pp unknown={delta_unknown:+.0f} avg_lat={delta_lat:+.1f}ms",
@@ -2910,6 +3048,8 @@ def _latest_run_status(proposal_id: int, phase: str) -> Optional[str]:
 
 
 def _promote_proposal_sync(proposal_id: int, force: bool = False) -> str:
+    import subprocess
+
     policy = _get_improve_policy()
     with get_db() as conn:
         p = conn.execute(
@@ -2921,6 +3061,10 @@ def _promote_proposal_sync(proposal_id: int, force: bool = False) -> str:
 
     if p["status"] in {"promoted", "rejected"}:
         return f"Proposal #{proposal_id} already {p['status']}."
+
+    art = _latest_artifact_for_proposal(proposal_id)
+    if not art:
+        return "⛔ No compiled artifact. Run /improve_compile <proposal_id> first."
 
     risk = (p["risk_level"] or "low").lower()
     sim = _latest_run_status(proposal_id, "simulation")
@@ -2940,20 +3084,56 @@ def _promote_proposal_sync(proposal_id: int, force: bool = False) -> str:
     if imp == "error" and not force:
         return "⛔ Impact comparison indicates regression. Use force only with explicit acceptance."
 
+    # Apply typed artifact (safe mutable scopes only)
+    ajson = json.loads(art["artifact_json"] or "{}")
+    atype = art["artifact_type"]
+    target = art["target"]
+    applied_desc = ""
+    if atype == "routing_rule" and target == "unknown_command_handler":
+        aliases = dict(_get_command_aliases())
+        for k, v in dict((ajson or {}).get("add_alias", {})).items():
+            aliases[str(k).strip().lower()] = str(v).strip().lower()
+        _set_command_aliases(aliases)
+        applied_desc = f"aliases={len(aliases)}"
+    elif atype == "config_change" and target == "runtime_retry_policy":
+        key = str((ajson or {}).get("key", "")).strip()
+        val = str((ajson or {}).get("value", "")).strip()
+        if key != "exec_retry_limit" or (not val.isdigit()):
+            return "⛔ Artifact apply failed: invalid retry policy payload."
+        _set_setting(key, val)
+        applied_desc = f"{key}={val}"
+    else:
+        return f"⛔ Unsupported artifact scope: {atype}:{target}"
+
+    commit_hash = "unknown"
+    try:
+        commit_hash = subprocess.check_output(["git", "-C", str(Path(__file__).resolve().parent), "rev-parse", "--short", "HEAD"], text=True).strip() or "unknown"
+    except Exception:
+        pass
+
     with get_db() as conn:
         conn.execute(
             "UPDATE improvement_proposals SET status='promoted' WHERE id=?",
             (proposal_id,),
         )
         conn.execute(
+            "UPDATE change_artifacts SET status='applied', applied_ts=CURRENT_TIMESTAMP, commit_hash=? WHERE id=?",
+            (commit_hash, int(art["id"])),
+        )
+        conn.execute(
             """
             INSERT INTO improvement_runs(proposal_id,phase,status,before_json,after_json,notes)
-            VALUES(?, 'promotion', 'ok', '{}', '{}', ?)
+            VALUES(?, 'promotion', 'ok', ?, ?, ?)
             """,
-            (proposal_id, f"policy={policy}; risk={risk}; force={int(force)}"),
+            (
+                proposal_id,
+                json.dumps({"artifact_id": int(art["id"]), "artifact_type": atype, "target": target}),
+                json.dumps({"applied": applied_desc}),
+                f"policy={policy}; risk={risk}; force={int(force)}; artifact_id={int(art['id'])}; commit={commit_hash}",
+            ),
         )
 
-    return f"✅ Proposal #{proposal_id} promoted under policy={policy} risk={risk}."
+    return f"✅ Proposal #{proposal_id} promoted+applied under policy={policy} risk={risk} artifact={atype}:{target} commit={commit_hash}."
 
 
 def _auto_promote_low_sync() -> str:
@@ -2970,15 +3150,8 @@ def _auto_promote_low_sync() -> str:
     blocked = 0
     for r in rows:
         pid = int(r["id"])
-        sim = _latest_run_status(pid, "simulation")
-        imp = _latest_run_status(pid, "impact_compare")
-        if sim == "ok" and imp != "error":
-            with get_db() as conn:
-                conn.execute("UPDATE improvement_proposals SET status='promoted' WHERE id=?", (pid,))
-                conn.execute(
-                    "INSERT INTO improvement_runs(proposal_id,phase,status,before_json,after_json,notes) VALUES(?, 'promotion', 'ok', '{}', '{}', 'auto_low')",
-                    (pid,),
-                )
+        msg = _promote_proposal_sync(pid, force=False)
+        if msg.startswith("✅"):
             promoted += 1
         else:
             blocked += 1
@@ -2996,9 +3169,13 @@ def _capture_evolution_memory_sync(proposal_id: int) -> str:
             raise ValueError(f"Proposal not found: {proposal_id}")
 
         runs = conn.execute(
-            "SELECT phase,status,notes,created_ts FROM improvement_runs WHERE proposal_id=? ORDER BY id ASC",
+            "SELECT phase,status,notes,created_ts,before_json,after_json FROM improvement_runs WHERE proposal_id=? ORDER BY id ASC",
             (proposal_id,),
         ).fetchall()
+        art = conn.execute(
+            "SELECT id,artifact_type,target,artifact_json,applied_ts,commit_hash FROM change_artifacts WHERE proposal_id=? ORDER BY id DESC LIMIT 1",
+            (proposal_id,),
+        ).fetchone()
 
         sim = [r for r in runs if r["phase"] == "simulation"]
         imp = [r for r in runs if r["phase"] == "impact_compare"]
@@ -3020,6 +3197,7 @@ def _capture_evolution_memory_sync(proposal_id: int) -> str:
         else:
             lesson = "Proposal is still in analysis stage; gather more telemetry before action."
 
+        last_imp = imp[-1] if imp else None
         evidence = {
             "title": p["title"],
             "risk_level": p["risk_level"],
@@ -3028,6 +3206,15 @@ def _capture_evolution_memory_sync(proposal_id: int) -> str:
             "cause": p["suspected_cause"],
             "metric_target": p["metric_target"],
             "run_count": len(runs),
+            "artifact": {
+                "id": int(art["id"]) if art else None,
+                "type": art["artifact_type"] if art else None,
+                "target": art["target"] if art else None,
+                "change": json.loads(art["artifact_json"] or "{}") if art else {},
+                "applied_ts": art["applied_ts"] if art else None,
+                "commit_hash": art["commit_hash"] if art else None,
+            },
+            "impact_notes": (last_imp["notes"] if last_imp else ""),
         }
 
         conn.execute(
@@ -3515,6 +3702,46 @@ async def cmd_improve_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
     await _reply(update, "\n".join(lines))
 
 
+async def cmd_improve_compile(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _owner_only(update):
+        return
+    raw = update.message.text.partition(" ")[2].strip()
+    try:
+        pid = int(raw)
+    except Exception:
+        await _reply(update, "Use: `/improve_compile <proposal_id>`")
+        return
+    loop = asyncio.get_running_loop()
+    rep = await loop.run_in_executor(None, lambda: _compile_proposal_to_change(pid))
+    await _reply(update, rep)
+
+
+async def cmd_improve_artifacts(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _owner_only(update):
+        return
+    raw = update.message.text.partition(" ")[2].strip()
+    with get_db() as conn:
+        if raw:
+            try:
+                pid = int(raw)
+            except Exception:
+                await _reply(update, "Use: `/improve_artifacts [proposal_id]`")
+                return
+            rows = conn.execute(
+                "SELECT id,proposal_id,artifact_type,target,status,created_ts,applied_ts,commit_hash FROM change_artifacts WHERE proposal_id=? ORDER BY id DESC LIMIT 10",
+                (pid,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id,proposal_id,artifact_type,target,status,created_ts,applied_ts,commit_hash FROM change_artifacts ORDER BY id DESC LIMIT 10"
+            ).fetchall()
+    if not rows:
+        await _reply(update, "No change artifacts yet.")
+        return
+    lines = [f"a#{int(r['id'])} p#{int(r['proposal_id'])} {r['artifact_type']}:{r['target']} {r['status']} commit={r['commit_hash'] or '-'}" for r in rows]
+    await _reply(update, "\n".join(lines))
+
+
 async def cmd_improve_simulate(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _owner_only(update):
         return
@@ -3987,6 +4214,8 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 /diagnose [days] — ops diagnosis from instrumentation signals
 /improve_propose [days] — generate a data-backed improvement proposal
 /improve_list — list recent improvement proposals
+/improve_compile <proposal_id> — compile proposal into typed change artifact
+/improve_artifacts [proposal_id] — list change artifacts
 /improve_simulate <proposal_id> — run simulation gate for a proposal
 /improve_runs [proposal_id] — list recent simulation runs
 /improve_compare <proposal_id> [window_days] — compare before/after impact
@@ -4030,8 +4259,14 @@ async def cmd_unknown(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not text.startswith("/"):
         return
     cmd = text.split()[0]
-    _record_op_event("unknown_command", chat_id=update.effective_chat.id, command=cmd, status="error")
-    await _reply(update, f"⛔ Unknown command: `{cmd}`\nUse `/help`.")
+    key = cmd.lstrip("/").lower()
+    aliases = _get_command_aliases()
+    sug = aliases.get(key)
+    _record_op_event("unknown_command", chat_id=update.effective_chat.id, command=cmd, status="error", metadata={"suggested": sug or ""})
+    if sug:
+        await _reply(update, f"⛔ Unknown command: `{cmd}`\nDid you mean `/{sug}` ?")
+    else:
+        await _reply(update, f"⛔ Unknown command: `{cmd}`\nUse `/help`.")
 
 
 # intent and email helpers moved to xobop/intents.py and xobop/emailer.py
@@ -4082,6 +4317,8 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             cmd_diagnose=lambda u: cmd_diagnose(u, ctx),
             cmd_improve_propose=lambda u: cmd_improve_propose(u, ctx),
             cmd_improve_list=lambda u: cmd_improve_list(u, ctx),
+            cmd_improve_compile=lambda u: cmd_improve_compile(u, ctx),
+            cmd_improve_artifacts=lambda u: cmd_improve_artifacts(u, ctx),
             cmd_improve_simulate=lambda u: cmd_improve_simulate(u, ctx),
             cmd_improve_runs=lambda u: cmd_improve_runs(u, ctx),
             cmd_improve_compare=lambda u: cmd_improve_compare(u, ctx),
@@ -4095,6 +4332,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             cmd_panicunlock=lambda u: cmd_panicunlock(u, ctx),
             panic_locked=_panic_locked,
             panic_bypass_text=_is_panic_bypass_text,
+            command_aliases_getter=_get_command_aliases,
             op_event=_record_op_event,
             log=log,
         )
@@ -4212,6 +4450,8 @@ def main() -> None:
     app.add_handler(CommandHandler("diagnose", cmd_diagnose))
     app.add_handler(CommandHandler("improve_propose", cmd_improve_propose))
     app.add_handler(CommandHandler("improve_list", cmd_improve_list))
+    app.add_handler(CommandHandler("improve_compile", cmd_improve_compile))
+    app.add_handler(CommandHandler("improve_artifacts", cmd_improve_artifacts))
     app.add_handler(CommandHandler("improve_simulate", cmd_improve_simulate))
     app.add_handler(CommandHandler("improve_runs", cmd_improve_runs))
     app.add_handler(CommandHandler("improve_compare", cmd_improve_compare))

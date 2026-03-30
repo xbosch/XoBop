@@ -140,9 +140,11 @@ Operational diagnosis based on telemetry:
 ### Proposal lifecycle
 - `/improve_propose [days]` — create proposal from diagnostics
 - `/improve_list` — list proposals
-- `/improve_simulate <proposal_id>` — run simulation gate
+- `/improve_compile <proposal_id>` — compile proposal into typed change artifact
+- `/improve_artifacts [proposal_id]` — list compiled/applied artifacts
+- `/improve_simulate <proposal_id>` — run simulation gate on compiled artifact
 - `/improve_runs [proposal_id]` — list simulation/impact/promotion runs
-- `/improve_compare <proposal_id> [window_days]` — before/after metrics
+- `/improve_compare <proposal_id> [window_days]` — before/after metrics (anchored to artifact deployment when available)
 
 ### Promotion policy
 - `/improve_policy [manual|assisted|auto_low]`

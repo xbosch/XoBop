@@ -87,6 +87,8 @@ async def process_text_message(
     cmd_diagnose,
     cmd_improve_propose,
     cmd_improve_list,
+    cmd_improve_compile,
+    cmd_improve_artifacts,
     cmd_improve_simulate,
     cmd_improve_runs,
     cmd_improve_compare,
@@ -100,6 +102,7 @@ async def process_text_message(
     cmd_panicunlock,
     panic_locked,
     panic_bypass_text,
+    command_aliases_getter,
     op_event,
     log,
 ) -> bool:
@@ -185,6 +188,14 @@ async def process_text_message(
         op_event("route_selected", chat_id=chat_id, route="cmd_improve_list")
         await cmd_improve_list(update)
         return True
+    if lower.startswith("/improve_compile"):
+        op_event("route_selected", chat_id=chat_id, route="cmd_improve_compile")
+        await cmd_improve_compile(update)
+        return True
+    if lower.startswith("/improve_artifacts"):
+        op_event("route_selected", chat_id=chat_id, route="cmd_improve_artifacts")
+        await cmd_improve_artifacts(update)
+        return True
     if lower.startswith("/improve_simulate"):
         op_event("route_selected", chat_id=chat_id, route="cmd_improve_simulate")
         await cmd_improve_simulate(update)
@@ -228,8 +239,14 @@ async def process_text_message(
         return True
     if text.startswith("/"):
         cmd = text.split()[0]
-        op_event("unknown_command", chat_id=chat_id, command=cmd, status="error")
-        await reply(update, f"⛔ Unknown command: `{cmd}`\nUse `/help`.")
+        key = cmd.lstrip("/").lower()
+        aliases = command_aliases_getter() or {}
+        sug = aliases.get(key)
+        op_event("unknown_command", chat_id=chat_id, command=cmd, status="error", metadata={"suggested": sug or ""})
+        if sug:
+            await reply(update, f"⛔ Unknown command: `{cmd}`\nDid you mean `/{sug}` ?")
+        else:
+            await reply(update, f"⛔ Unknown command: `{cmd}`\nUse `/help`.")
         return True
 
     intent = classify(text)
