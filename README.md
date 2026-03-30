@@ -86,6 +86,7 @@ Important options:
 - `MODEL=gpt-4.1-mini`
 - `EMBEDDING_MODEL=text-embedding-3-small`
 - `ALLOW_RAW_SHELL=0`
+- `PANIC_UNLOCK_CODE=<high_entropy_secret>`
 - `ALLOWED_WRITE_ROOT=/home/xavi/.openclaw/workspace/xobops-test`
 - `READ_ROOT=/home/xavi/.openclaw/workspace/xobops-test`
 - `GMAIL_EMAIL=...` (optional)
@@ -229,6 +230,7 @@ Core:
 - `/mode`, `/promptshow`, `/promptset`, `/plan`, `/go`
 - `/promptproposal`, `/promptapprove`, `/promptreject`
 - `/exec`
+- `/panicstatus`, `/paniclock arm|confirm <token>`, `/panicunlock <code>`
 - `/cronadd`, `/cronlist`, `/cronrun`, `/cronruns`, `/cronon`, `/cronoff`, `/cronrm`
 
 Memory/tasks/skills:

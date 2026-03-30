@@ -84,9 +84,18 @@ async def process_text_message(
     cmd_status,
     cmd_health,
     cmd_checkup,
+    cmd_panicstatus,
+    cmd_paniclock,
+    cmd_panicunlock,
+    panic_locked,
+    panic_bypass_text,
     log,
 ) -> bool:
     if not owner_only(update):
+        return True
+
+    if panic_locked() and not panic_bypass_text(text):
+        await reply(update, "⛔ Panic-lock active. Allowed commands: /panicstatus, /panicunlock <code>, /status, /health, /checkup, /help")
         return True
 
     if refers_to_last_attachment(text) and chat_id in state.last_attachment_by_chat:
@@ -146,6 +155,15 @@ async def process_text_message(
         return True
     if lower.startswith("/checkup"):
         await cmd_checkup(update)
+        return True
+    if lower.startswith("/panicstatus"):
+        await cmd_panicstatus(update)
+        return True
+    if lower.startswith("/paniclock"):
+        await cmd_paniclock(update)
+        return True
+    if lower.startswith("/panicunlock"):
+        await cmd_panicunlock(update)
         return True
 
     intent = classify(text)

@@ -105,6 +105,7 @@ DEFAULT_MODE = os.getenv("DEFAULT_MODE", "strict").strip().lower()
 ARTIFACT_DIR = Path(os.getenv("ARTIFACT_DIR", "artifacts")).resolve()
 ALLOWED_WRITE_ROOT = Path(os.getenv("ALLOWED_WRITE_ROOT", os.getcwd())).resolve()
 ALLOW_RAW_SHELL = os.getenv("ALLOW_RAW_SHELL", "0").strip() == "1"
+PANIC_UNLOCK_CODE = os.getenv("PANIC_UNLOCK_CODE", "").strip()
 READ_ROOT = Path(os.getenv("READ_ROOT", str(ALLOWED_WRITE_ROOT))).resolve()
 EMBEDDING_FALLBACK = os.getenv("EMBEDDING_FALLBACK", "1").strip() == "1"
 FILE_MEMORY_ROOT = Path(os.getenv("FILE_MEMORY_ROOT", str(ALLOWED_WRITE_ROOT))).resolve()
@@ -610,6 +611,23 @@ def _get_mode() -> str:
 
 def _overseer_enabled() -> bool:
     return _get_mode() == "overseer"
+
+
+def _panic_locked() -> bool:
+    return (_get_setting("panic_lock", "0") or "0").strip() == "1"
+
+
+def _is_panic_bypass_text(text: str) -> bool:
+    t = (text or "").strip().lower()
+    allowed_prefixes = (
+        "/panicstatus",
+        "/panicunlock",
+        "/status",
+        "/health",
+        "/checkup",
+        "/help",
+    )
+    return any(t.startswith(p) for p in allowed_prefixes)
 
 
 def _in_quiet_hours() -> bool:
@@ -1718,6 +1736,10 @@ _last_openai_latency_ms: float = 0.0
 async def _run_cron_job(job_name: str) -> None:
     log.info("Cron job starting: %s", job_name)
     start = time.monotonic()
+    if _panic_locked():
+        duration_ms = int((time.monotonic() - start) * 1000)
+        _record_cron_run(job_name, "skipped", duration_ms, "", "panic-lock active")
+        return
     with get_db() as conn:
         row = conn.execute("SELECT * FROM cron_jobs WHERE name=? AND enabled=1", (job_name,)).fetchone()
     if not row:
@@ -2095,6 +2117,8 @@ async def _exec_shell_command(skill: SkillDef, policies: dict, user_query: str, 
 
 async def _call_skill(chat_id: int, user_query: str, mode: str, skill_name: str, args: dict) -> str:
     start = time.monotonic()
+    if _panic_locked() and skill_name not in {"read_file", "browse_page"}:
+        return "⛔ Panic-lock active: execution skills are disabled. Use /panicstatus or /panicunlock <code>."
     exit_code: Optional[int] = None
     status = "ok"
     artifact_path: Optional[str] = None
@@ -2839,6 +2863,9 @@ async def cmd_memdel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_exec(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _owner_only(update):
         return
+    if _panic_locked():
+        await _reply(update, "⛔ Panic-lock active: /exec disabled.")
+        return
     chat_id = update.effective_chat.id
     command = update.message.text.partition(" ")[2].strip()
     if not command:
@@ -2904,6 +2931,9 @@ async def cmd_skilloff(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_cronadd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _owner_only(update):
         return
+    if _panic_locked():
+        await _reply(update, "⛔ Panic-lock active: /cronadd disabled.")
+        return
     body = update.message.text.partition(" ")[2].strip()
 
     # tolerate optional trailing force token: "... | {json} force"
@@ -2945,6 +2975,9 @@ async def cmd_cronadd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_cronrm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _owner_only(update):
         return
+    if _panic_locked():
+        await _reply(update, "⛔ Panic-lock active: /cronrm disabled.")
+        return
     name = update.message.text.partition(" ")[2].strip()
     if not name:
         await _reply(update, "Use: `/cronrm <n>`")
@@ -2967,6 +3000,9 @@ async def cmd_cronlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_cronon(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _owner_only(update):
         return
+    if _panic_locked():
+        await _reply(update, "⛔ Panic-lock active: /cronon disabled.")
+        return
     name = update.message.text.partition(" ")[2].strip()
     if not name:
         await _reply(update, "Use: `/cronon <n>`")
@@ -2980,6 +3016,9 @@ async def cmd_cronon(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_cronoff(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _owner_only(update):
+        return
+    if _panic_locked():
+        await _reply(update, "⛔ Panic-lock active: /cronoff disabled.")
         return
     name = update.message.text.partition(" ")[2].strip()
     if not name:
@@ -3014,6 +3053,9 @@ async def cmd_cronruns(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_cronrun(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _owner_only(update):
         return
+    if _panic_locked():
+        await _reply(update, "⛔ Panic-lock active: /cronrun disabled.")
+        return
     name = update.message.text.partition(" ")[2].strip()
     if not name:
         await _reply(update, "Use: `/cronrun <n>`")
@@ -3033,6 +3075,67 @@ async def cmd_clearctx(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     history_by_chat[update.effective_chat.id] = []
     await _reply(update, "Context cleared.")
+
+
+async def cmd_panicstatus(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _owner_only(update):
+        return
+    lock = "ON" if _panic_locked() else "OFF"
+    arm = (_get_setting("panic_arm_token", "") or "").strip()
+    await _reply(update, f"Panic-lock: {lock}\nArmed: {'yes' if arm else 'no'}")
+
+
+async def cmd_paniclock(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _owner_only(update):
+        return
+    raw = update.message.text.partition(" ")[2].strip()
+    now = int(time.time())
+
+    if raw == "arm":
+        token = uuid.uuid4().hex[:12]
+        _set_setting("panic_arm_token", token)
+        _set_setting("panic_arm_ts", str(now))
+        await _reply(update, f"⚠️ Panic-lock arm set. Confirm within 120s:\n`/paniclock confirm {token}`")
+        return
+
+    if raw.startswith("confirm "):
+        token = raw.split(" ", 1)[1].strip()
+        armed = (_get_setting("panic_arm_token", "") or "").strip()
+        try:
+            arm_ts = int((_get_setting("panic_arm_ts", "0") or "0").strip())
+        except Exception:
+            arm_ts = 0
+        if not armed or token != armed:
+            await _reply(update, "⛔ Invalid arm token. Use `/paniclock arm` first.")
+            return
+        if (now - arm_ts) > 120:
+            _set_setting("panic_arm_token", "")
+            _set_setting("panic_arm_ts", "0")
+            await _reply(update, "⛔ Arm token expired. Run `/paniclock arm` again.")
+            return
+        _set_setting("panic_lock", "1")
+        _set_setting("panic_arm_token", "")
+        _set_setting("panic_arm_ts", "0")
+        await _reply(update, "🛑 Panic-lock enabled. Exec/write/cron operations are now blocked.")
+        return
+
+    await _reply(update, "Use: `/paniclock arm` then `/paniclock confirm <token>`")
+
+
+async def cmd_panicunlock(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _owner_only(update):
+        return
+    code = update.message.text.partition(" ")[2].strip()
+    if not PANIC_UNLOCK_CODE:
+        await _reply(update, "⛔ PANIC_UNLOCK_CODE is not configured in environment.")
+        return
+    if not code or code != PANIC_UNLOCK_CODE:
+        await _reply(update, "⛔ Invalid unlock code.")
+        return
+    _set_setting("panic_lock", "0")
+    _set_setting("panic_arm_token", "")
+    _set_setting("panic_arm_ts", "0")
+    await _reply(update, "✅ Panic-lock disabled.")
 
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3069,6 +3172,9 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 /topskills — most used skills
 /clearctx — clear conversation context
 /exec command — run through agent
+/panicstatus — show panic-lock state
+/paniclock arm|confirm <token> — enable panic-lock (2-step)
+/panicunlock <code> — disable panic-lock (requires env code)
 
 *Skills*
 /skills — list skills
@@ -3107,6 +3213,10 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     text = (update.message.text or "").strip()
     chat_id = update.effective_chat.id
 
+    if _panic_locked() and not _is_panic_bypass_text(text):
+        await _reply(update, "⛔ Panic-lock active. Allowed commands: /panicstatus, /panicunlock <code>, /status, /health, /checkup, /help")
+        return
+
     try:
         await process_text_message(
             update=update,
@@ -3126,6 +3236,11 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             cmd_status=lambda u: cmd_status(u, ctx),
             cmd_health=lambda u: cmd_health(u, ctx),
             cmd_checkup=lambda u: cmd_checkup(u, ctx),
+            cmd_panicstatus=lambda u: cmd_panicstatus(u, ctx),
+            cmd_paniclock=lambda u: cmd_paniclock(u, ctx),
+            cmd_panicunlock=lambda u: cmd_panicunlock(u, ctx),
+            panic_locked=_panic_locked,
+            panic_bypass_text=_is_panic_bypass_text,
             log=log,
         )
     except Exception as exc:
@@ -3243,6 +3358,9 @@ def main() -> None:
     app.add_handler(CommandHandler("go", cmd_go))
     app.add_handler(CommandHandler("topskills", cmd_topskills))
     app.add_handler(CommandHandler("exec", cmd_exec))
+    app.add_handler(CommandHandler("panicstatus", cmd_panicstatus))
+    app.add_handler(CommandHandler("paniclock", cmd_paniclock))
+    app.add_handler(CommandHandler("panicunlock", cmd_panicunlock))
     app.add_handler(CommandHandler("skills", cmd_skills))
     app.add_handler(CommandHandler("skillon", cmd_skillon))
     app.add_handler(CommandHandler("skilloff", cmd_skilloff))
