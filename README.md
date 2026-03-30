@@ -41,7 +41,7 @@ flowchart TD
     CJ --> CR[cron_runs]
     CJ --> C
 
-    T --> OBS[Observability]\n
+    T --> OBS[Observability]
     OBS --> OPE[op_events]
     OPE --> SIG[op_signals_daily]
     SIG --> DIAG[/diagnose]
