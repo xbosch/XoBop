@@ -61,7 +61,7 @@ from telegram.ext import (
 
 from xobop.state import STATE
 from xobop.capabilities_shell import exec_shell_command
-from xobop.db import db_session
+from xobop.db import db_session, sqlite_online_backup
 from xobop.handlers_runtime import process_media_message, process_text_message
 
 # =============================================================================
@@ -1154,8 +1154,47 @@ def _memory_rows() -> list[sqlite3.Row]:
     return rows
 
 
+def _retrieve_memory_lexical(query: str, k: int = MAX_MEMORY_RESULTS) -> list[MemoryItem]:
+    terms = [w for w in _split_words(query) if len(w) >= 3][:6]
+    if not terms:
+        return []
+
+    like_clause = " OR ".join(["LOWER(text) LIKE ?" for _ in terms])
+    vals = tuple(f"%{t}%" for t in terms)
+    sql = f"""
+        SELECT id,text,mem_type,importance,created_ts,last_access_ts
+        FROM memory_items
+        WHERE is_deleted=0 AND ({like_clause})
+        ORDER BY pinned DESC, importance DESC, last_access_ts DESC, id DESC
+        LIMIT ?
+    """
+    with get_db() as conn:
+        rows = conn.execute(sql, vals + (max(1, min(k, MAX_MEMORY_RESULTS)),)).fetchall()
+        ids = [int(r["id"]) for r in rows]
+        if ids:
+            conn.executemany(
+                "UPDATE memory_items SET access_count = access_count + 1, last_access_ts=CURRENT_TIMESTAMP WHERE id=?",
+                [(i,) for i in ids],
+            )
+
+    return [
+        MemoryItem(
+            id=int(r["id"]),
+            text=r["text"],
+            mem_type=r["mem_type"],
+            importance=float(r["importance"]),
+            created_ts=r["created_ts"],
+            last_access_ts=r["last_access_ts"],
+        )
+        for r in rows
+    ]
+
+
 async def _retrieve_memory(query: str, k: int = MAX_MEMORY_RESULTS) -> list[MemoryItem]:
-    q_emb, _model = await _embed_text(query)
+    q_emb, model_name = await _embed_text(query)
+    if str(model_name).startswith("fallback"):
+        return _retrieve_memory_lexical(query, k=k)
+
     rows = _memory_rows()
     scored: list[tuple[float, MemoryItem]] = []
     for r in rows:
@@ -1552,6 +1591,11 @@ async def _run_cron_job(job_name: str) -> None:
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, _prune_memory_sync)
             output = "Memory cleanup completed."
+        elif skill_type == "db_backup":
+            backup_dir = skill_args.get("backup_dir", str(Path("backups").resolve()))
+            loop = asyncio.get_running_loop()
+            dst = await loop.run_in_executor(None, lambda: sqlite_online_backup(DB_FILE, backup_dir))
+            output = f"DB backup completed: {dst}"
         else:
             raise ValueError(f"Unknown cron skill_type: {skill_type}")
     except Exception as exc:
@@ -2387,7 +2431,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 /cronrun name — run now
 /cronruns name [limit] — recent runs
 
-Cron skill_types: run_shell, browse_page, read_file, write_file, append_file, agent, memory_cleanup
+Cron skill_types: run_shell, browse_page, read_file, write_file, append_file, agent, memory_cleanup, db_backup
 Schedule: cron syntax or natural language like every day at 9am
 """)
 

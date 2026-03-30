@@ -27,6 +27,7 @@ The goal is operational reliability over chatty behavior.
   - semantic memory + vectors
 - Skill/tool execution with policy checks
 - DB-backed cron scheduler (APScheduler + `cron_jobs`/`cron_runs`)
+- Online SQLite backup capability (`db_backup` cron skill, uses SQLite backup API)
 
 ---
 
