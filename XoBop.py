@@ -65,6 +65,7 @@ from xobop.state import STATE
 from xobop.capabilities_shell import exec_shell_command
 from xobop.db import db_session, sqlite_online_backup
 from xobop.handlers_runtime import process_media_message, process_text_message
+from xobop.router import classify
 
 # =============================================================================
 # Logging
@@ -2686,6 +2687,103 @@ def _generate_improvement_proposal(days: int = 7) -> tuple[int, str]:
     return pid, out
 
 
+def _simulate_proposal_sync(proposal_id: int) -> str:
+    import subprocess
+
+    code_path = Path(__file__).resolve()
+    repo = code_path.parent
+    py = (repo / ".venv" / "bin" / "python")
+    if not py.exists():
+        py = Path(sys.executable)
+
+    checks: list[tuple[str, bool, str]] = []
+
+    # 1) compile gate
+    try:
+        proc = subprocess.run(
+            [str(py), "-m", "py_compile", "XoBop.py"],
+            cwd=str(repo),
+            text=True,
+            capture_output=True,
+            timeout=60,
+        )
+        ok = proc.returncode == 0
+        note = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()[:300]
+        checks.append(("compile", ok, note or "ok"))
+    except Exception as exc:
+        checks.append(("compile", False, str(exc)[:300]))
+
+    # 2) deterministic eval suite gate
+    try:
+        proc = subprocess.run(
+            [str(py), "scripts/eval_suite.py"],
+            cwd=str(repo),
+            text=True,
+            capture_output=True,
+            timeout=180,
+        )
+        out = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+        ok = proc.returncode == 0 and ("RESULT: PASS" in out)
+        checks.append(("eval_suite", ok, out[-300:] if out else "ok"))
+    except Exception as exc:
+        checks.append(("eval_suite", False, str(exc)[:300]))
+
+    # 3) regression replay (router deterministic samples)
+    replay_ok = True
+    replay_note = "ok"
+    try:
+        samples = [
+            ("/cronlist", "cron_list"),
+            ("how many files in downloads", "download_count"),
+            ("did you send the email?", "email_status"),
+            ("git status", "direct_shell"),
+        ]
+        bad = []
+        for text, expected in samples:
+            got = classify(text)["name"]
+            if got != expected:
+                bad.append(f"{text} => {got} (expected {expected})")
+        if bad:
+            replay_ok = False
+            replay_note = "; ".join(bad)[:300]
+    except Exception as exc:
+        replay_ok = False
+        replay_note = str(exc)[:300]
+    checks.append(("replay_regression", replay_ok, replay_note))
+
+    overall = all(ok for _, ok, _ in checks)
+
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT risk_level,title FROM improvement_proposals WHERE id=?",
+            (proposal_id,),
+        ).fetchone()
+        if not row:
+            raise ValueError(f"Proposal not found: {proposal_id}")
+        before = {"proposal_id": proposal_id, "risk_level": row["risk_level"], "title": row["title"]}
+        after = {k: {"ok": ok, "note": note} for k, ok, note in checks}
+        conn.execute(
+            """
+            INSERT INTO improvement_runs(proposal_id,phase,status,before_json,after_json,notes)
+            VALUES(?, 'simulation', ?, ?, ?, ?)
+            """,
+            (
+                proposal_id,
+                "ok" if overall else "error",
+                json.dumps(before),
+                json.dumps(after),
+                "simulation gate",
+            ),
+        )
+
+    lines = [f"Simulation for proposal #{proposal_id}: {'PASS' if overall else 'FAIL'}"]
+    for name, ok, note in checks:
+        lines.append(f"• {name}: {'✅' if ok else '❌'}")
+        if note and note != "ok":
+            lines.append(f"  - {note}")
+    return "\n".join(lines)
+
+
 def _top_skills(limit: int = 10) -> str:
     with get_db() as conn:
         rows = conn.execute(
@@ -3144,6 +3242,46 @@ async def cmd_improve_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
     await _reply(update, "\n".join(lines))
 
 
+async def cmd_improve_simulate(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _owner_only(update):
+        return
+    raw = update.message.text.partition(" ")[2].strip()
+    try:
+        proposal_id = int(raw)
+    except Exception:
+        await _reply(update, "Use: `/improve_simulate <proposal_id>`")
+        return
+    loop = asyncio.get_running_loop()
+    rep = await loop.run_in_executor(None, lambda: _simulate_proposal_sync(proposal_id))
+    await _reply(update, rep)
+
+
+async def cmd_improve_runs(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _owner_only(update):
+        return
+    raw = update.message.text.partition(" ")[2].strip()
+    with get_db() as conn:
+        if raw:
+            try:
+                pid = int(raw)
+            except Exception:
+                await _reply(update, "Use: `/improve_runs [proposal_id]`")
+                return
+            rows = conn.execute(
+                "SELECT id,proposal_id,created_ts,phase,status,notes FROM improvement_runs WHERE proposal_id=? ORDER BY id DESC LIMIT 10",
+                (pid,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id,proposal_id,created_ts,phase,status,notes FROM improvement_runs ORDER BY id DESC LIMIT 10"
+            ).fetchall()
+    if not rows:
+        await _reply(update, "No improvement runs yet.")
+        return
+    lines = [f"run#{int(r['id'])} p#{int(r['proposal_id'] or 0)} {r['phase']} {r['status']} — {r['created_ts']}" for r in rows]
+    await _reply(update, "\n".join(lines))
+
+
 async def cmd_topskills(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if _owner_only(update):
         await _reply(update, _top_skills())
@@ -3493,6 +3631,8 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 /diagnose [days] — ops diagnosis from instrumentation signals
 /improve_propose [days] — generate a data-backed improvement proposal
 /improve_list — list recent improvement proposals
+/improve_simulate <proposal_id> — run simulation gate for a proposal
+/improve_runs [proposal_id] — list recent simulation runs
 /plan goal — create execution manifest
 /go — execute staged manifest
 /topskills — most used skills
@@ -3580,6 +3720,8 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             cmd_diagnose=lambda u: cmd_diagnose(u, ctx),
             cmd_improve_propose=lambda u: cmd_improve_propose(u, ctx),
             cmd_improve_list=lambda u: cmd_improve_list(u, ctx),
+            cmd_improve_simulate=lambda u: cmd_improve_simulate(u, ctx),
+            cmd_improve_runs=lambda u: cmd_improve_runs(u, ctx),
             cmd_panicstatus=lambda u: cmd_panicstatus(u, ctx),
             cmd_paniclock=lambda u: cmd_paniclock(u, ctx),
             cmd_panicunlock=lambda u: cmd_panicunlock(u, ctx),
@@ -3702,6 +3844,8 @@ def main() -> None:
     app.add_handler(CommandHandler("diagnose", cmd_diagnose))
     app.add_handler(CommandHandler("improve_propose", cmd_improve_propose))
     app.add_handler(CommandHandler("improve_list", cmd_improve_list))
+    app.add_handler(CommandHandler("improve_simulate", cmd_improve_simulate))
+    app.add_handler(CommandHandler("improve_runs", cmd_improve_runs))
     app.add_handler(CommandHandler("plan", cmd_plan))
     app.add_handler(CommandHandler("go", cmd_go))
     app.add_handler(CommandHandler("topskills", cmd_topskills))
