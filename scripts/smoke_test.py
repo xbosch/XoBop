@@ -42,36 +42,38 @@ def tg_send(token: str, chat_id: str, text: str) -> None:
         raise RuntimeError(f"Telegram send failed: {body}")
 
 
-def db_max_id(conn: sqlite3.Connection, chat_id: int) -> int:
-    row = conn.execute(
-        "SELECT COALESCE(MAX(id),0) FROM conversations WHERE chat_id=?", (chat_id,)
-    ).fetchone()
+def db_max_id(chat_id: int) -> int:
+    with sqlite3.connect(str(DB_PATH)) as conn:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(id),0) FROM conversations WHERE chat_id=?", (chat_id,)
+        ).fetchone()
     return int(row[0] if row else 0)
 
 
-def wait_assistant_reply(conn: sqlite3.Connection, chat_id: int, after_id: int, timeout_s: int = 25) -> str:
+def wait_assistant_reply(chat_id: int, after_id: int, timeout_s: int = 25) -> str:
     t0 = time.time()
     while time.time() - t0 < timeout_s:
-        row = conn.execute(
-            """
-            SELECT id, content
-            FROM conversations
-            WHERE chat_id=? AND role='assistant' AND id>?
-            ORDER BY id DESC
-            LIMIT 1
-            """,
-            (chat_id, after_id),
-        ).fetchone()
+        with sqlite3.connect(str(DB_PATH)) as conn:
+            row = conn.execute(
+                """
+                SELECT id, content
+                FROM conversations
+                WHERE chat_id=? AND role='assistant' AND id>?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (chat_id, after_id),
+            ).fetchone()
         if row:
             return str(row[1] or "")
         time.sleep(0.8)
     raise TimeoutError("Timed out waiting for assistant reply")
 
 
-def step(conn: sqlite3.Connection, token: str, chat_id: int, name: str, text: str, must_contain: list[str] | None = None) -> str:
-    before = db_max_id(conn, chat_id)
+def step(token: str, chat_id: int, name: str, text: str, must_contain: list[str] | None = None) -> str:
+    before = db_max_id(chat_id)
     tg_send(token, str(chat_id), text)
-    reply = wait_assistant_reply(conn, chat_id, before)
+    reply = wait_assistant_reply(chat_id, before)
     if "LLM error" in reply or "⚠️ Error" in reply:
         raise AssertionError(f"{name} failed with bot error: {reply}")
     if must_contain:
@@ -100,26 +102,24 @@ def main() -> int:
         print("Missing TELEGRAM_TOKEN in .env", file=sys.stderr)
         return 2
 
-    conn = sqlite3.connect(str(DB_PATH))
     try:
-        step(conn, token, int(chat_id), "status", "/status", ["Model:", "Mode:"])
-        step(conn, token, int(chat_id), "promptshow", "/promptshow", ["Mode:", "Prompt chars:"])
+        step(token, int(chat_id), "status", "/status", ["Model:", "Mode:"])
+        step(token, int(chat_id), "promptshow", "/promptshow", ["Mode:", "Prompt chars:"])
         step(
-            conn,
             token,
             int(chat_id),
             "direct git status",
             "git -C /home/xavi/.openclaw/workspace/xobops-test status",
             ["On branch"],
         )
-        step(conn, token, int(chat_id), "memadd", f"/memadd {marker}", ["Memory #"])
-        mem_reply = step(conn, token, int(chat_id), "memories", "/memories 10")
+        step(token, int(chat_id), "memadd", f"/memadd {marker}", ["Memory #"])
+        mem_reply = step(token, int(chat_id), "memories", "/memories 10")
         if marker not in mem_reply:
             raise AssertionError(f"marker not found in /memories output: {marker}")
 
-        step(conn, token, int(chat_id), "cronlist", "/cronlist", [cron_job])
-        step(conn, token, int(chat_id), "cronrun", f"/cronrun {cron_job}", ["Running job"])
-        runs = step(conn, token, int(chat_id), "cronruns", f"/cronruns {cron_job}")
+        step(token, int(chat_id), "cronlist", "/cronlist", [cron_job])
+        step(token, int(chat_id), "cronrun", f"/cronrun {cron_job}", ["Running job"])
+        runs = step(token, int(chat_id), "cronruns", f"/cronruns {cron_job}")
         if "No runs for job" in runs:
             raise AssertionError(f"cron job has no runs: {cron_job}")
 
@@ -129,7 +129,7 @@ def main() -> int:
         print(f"\nSMOKE TEST RESULT: FAIL\n{exc}", file=sys.stderr)
         return 1
     finally:
-        conn.close()
+        pass
 
 
 if __name__ == "__main__":
