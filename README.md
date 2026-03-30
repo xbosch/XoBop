@@ -1,6 +1,9 @@
 # XoBop
 
-Owner-scoped Telegram copilot with deterministic command routing, SQLite memory, and DB-backed cron jobs.
+XoBop is an owner-scoped Telegram copilot for local operations and memory-backed assistance.
+It is built to execute practical tasks (shell/file/cron/email workflows) with deterministic routing first and LLM fallback second.
+Typical use is: ask in Telegram, XoBop executes with policy gates, persists context in SQLite, and reports concrete outcomes.
+The goal is operational reliability over chatty behavior.
 
 ## Current status
 
@@ -9,7 +12,6 @@ Owner-scoped Telegram copilot with deterministic command routing, SQLite memory,
 - ✅ Runtime prompts stored in DB (`strict` / `normal`)
 - ✅ Command routing hardening (`/exec`, direct shell intents, cron list intent)
 - ✅ Interactive smoke verification (`scripts/smoke_watch.py`)
-- ⚠️ Important: do **not** back up a live SQLite DB with plain `cp`
 
 ---
 
@@ -43,9 +45,11 @@ source .venv/bin/activate
 pip install -U pip
 pip install -r requirements.txt
 cp .env.example .env
-# set TELEGRAM_TOKEN, OPENAI_API_KEY, OWNER_ID
+# set TELEGRAM_TOKEN, OPENAI_API_KEY, OWNER_ID (and Gmail vars if email workflows are used)
 ./run_test.sh
 ```
+
+> Note: `run_test.sh` is the runtime launcher (legacy name), not a unit-test runner.
 
 ---
 
@@ -57,13 +61,39 @@ Required:
 - `OPENAI_API_KEY`
 - `OWNER_ID`
 
-Defaults:
+Important defaults/options:
 
 - `DB_FILE=memory.db`
 - `MODEL=gpt-4.1-mini`
 - `EMBEDDING_MODEL=text-embedding-3-small`
 - `DEFAULT_MODE=strict`
 - `ALLOW_RAW_SHELL=0`
+- `ALLOWED_WRITE_ROOT=/home/xavi/.openclaw/workspace/xobops-test`
+- `READ_ROOT=/home/xavi/.openclaw/workspace/xobops-test`
+- `GMAIL_EMAIL=...` (optional, needed for email workflows)
+- `GMAIL_APP_PASSWORD=...` (optional, needed for email workflows)
+
+### `.env.example` (canonical template)
+
+```env
+TELEGRAM_TOKEN=your_telegram_bot_token
+OPENAI_API_KEY=your_openai_key
+OWNER_ID=5410368885
+GMAIL_EMAIL=your_gmail_address@gmail.com
+GMAIL_APP_PASSWORD=your_16_char_google_app_password
+MODEL=gpt-4.1-mini
+EMBEDDING_MODEL=text-embedding-3-small
+DB_FILE=memory.db
+DEFAULT_MODE=strict
+ARTIFACT_DIR=artifacts
+ALLOWED_WRITE_ROOT=/home/xavi/.openclaw/workspace/xobops-test
+READ_ROOT=/home/xavi/.openclaw/workspace/xobops-test
+ALLOW_RAW_SHELL=0
+EMBEDDING_FALLBACK=1
+FILE_MEMORY_ROOT=/home/xavi/.openclaw/workspace/xobops-test
+LONG_MEMORY_FILE=/home/xavi/.openclaw/workspace/xobops-test/MEMORY.md
+DAILY_MEMORY_DIR=/home/xavi/.openclaw/workspace/xobops-test/memory
+```
 
 ---
 
@@ -86,6 +116,7 @@ xobops-test/
 ├── run_test.sh              # Launcher
 ├── .env                     # Secrets (ignored)
 ├── .env.example             # Template
+├── .gitignore               # Ignore rules for secrets/runtime artifacts
 ├── requirements.txt
 ├── memory.db                # Runtime DB (ignored)
 ├── memory.db-shm/.wal       # SQLite runtime files (ignored)
@@ -122,12 +153,18 @@ Quick schema inspection:
 ```bash
 python3 - <<'PY'
 import sqlite3
-con=sqlite3.connect('/home/xavi/.openclaw/workspace/xobops-test/memory.db')
+con=sqlite3.connect('./memory.db')
 for row in con.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"):
     print(row[0])
 con.close()
 PY
 ```
+
+### Migration note
+
+- Current runtime expects `DB_FILE` schema created/managed by `_init_db` at startup.
+- Fresh DBs are auto-initialized.
+- Legacy DB migration from older versions is not fully automated/documented yet; test on a copy first.
 
 ---
 
@@ -159,18 +196,29 @@ PY
 
 ---
 
-## Commands (core)
+## Commands
+
+Core examples:
 
 - `/status`
 - `/mode strict|normal`
 - `/promptshow`
 - `/promptset strict|normal <text|reset>`
-- `/skills`
 - `/exec <command>`
 - `/cronadd ...`
 - `/cronlist`
 - `/cronrun <name>`
 - `/cronruns <name> [limit]`
+
+Additional supported commands include memory/task/skill controls such as:
+
+- `/remember`, `/delfact`, `/facts`
+- `/addtask`, `/donetask`, `/tasks`
+- `/memories`, `/memadd`, `/memdel`
+- `/skills`, `/skillon`, `/skilloff`
+- `/clearctx`, `/help`
+
+For complete and current command list, use `/help` in Telegram.
 
 ---
 
@@ -183,7 +231,14 @@ cd /home/xavi/.openclaw/workspace/xobops-test
 ./scripts/smoke_test.sh
 ```
 
-This launches an interactive verifier and asks you to send test commands in Telegram, then validates replies via DB.
+What it does:
+- launches interactive verifier (`smoke_watch.py`)
+- prompts you to send command + free-text checks in Telegram
+- validates assistant replies via `memory.db`
+
+Interpretation:
+- **PASS**: all prompted checks matched expected output tokens
+- **FAIL**: script prints failing step + missing token or timeout reason
 
 ---
 
