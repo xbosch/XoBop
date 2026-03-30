@@ -16,9 +16,11 @@ CHAT_ID = 5410368885
 
 TESTS = [
     ("/status", ["Model:", "Mode:"]),
+    ("hello", []),
     ("/promptshow", ["Mode:", "Prompt chars:"]),
     ("git -C /home/xavi/.openclaw/workspace/xobops-test status", ["On branch"]),
-    ("/cronlist", ["inbox-summary-2030"]),
+    ("can you see how many files do I have on my download folder?", ["files in Downloads"]),
+    ("/cronlist", []),
 ]
 
 

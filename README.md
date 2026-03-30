@@ -128,13 +128,28 @@ PY
 
 ---
 
+## Architecture layers
+
+1. **Transport layer** (`XoBop.py` handlers)
+   - Telegram updates, commands, media intake, error handling
+2. **Routing layer** (`xobop/router.py`)
+   - unified intent/action classification
+3. **Workflow layer** (`xobop/workflows.py`, `xobop/state.py`)
+   - pending actions, continuation, status tracking
+4. **Capability layer** (`xobop/capabilities_*.py`, `xobop/emailer.py`)
+   - shell/files/email executable operations
+5. **Agent layer** (`_run_agent` in `XoBop.py`)
+   - LLM + tool loop when structured routes do not apply
+6. **Persistence/scheduling layer** (`memory.db`, APScheduler)
+   - durable state, cron jobs, run history
+
 ## Runtime flow
 
 1. Telegram update arrives
 2. Owner check
 3. Routing:
    - command handlers (`/status`, `/cron*`, `/prompt*`, etc.)
-   - deterministic intent shortcuts (cron list, direct shell intents)
+   - structured router/actions (deterministic)
    - fallback to `_run_agent()` for general chat/tool loop
 4. Persistence in `memory.db`
 5. Scheduler runs `cron_jobs`, writes `cron_runs`

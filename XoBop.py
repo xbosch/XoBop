@@ -2626,6 +2626,16 @@ async def _graceful_shutdown(app: Application) -> None:
     await app.shutdown()
 
 
+async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    err = context.error
+    log.exception("Unhandled handler error: %s", err)
+    try:
+        if update and getattr(update, "effective_message", None):
+            await update.effective_message.reply_text("⚠️ Internal error. Please retry.")
+    except Exception:
+        pass
+
+
 def main() -> None:
     _init_db()
     if _get_setting("mode") not in MODES:
@@ -2678,6 +2688,7 @@ def main() -> None:
     app.add_handler(CommandHandler("cronruns", cmd_cronruns))
     app.add_handler(MessageHandler((filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, handle_media_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_error_handler(_on_error)
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
