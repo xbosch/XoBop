@@ -257,6 +257,20 @@ cd /home/xavi/.openclaw/workspace/xobops-test
 - **PASS** => all checks matched
 - **FAIL** => step + reason reported
 
+## Security regression evals (Phase 9)
+
+```bash
+cd /home/xavi/.openclaw/workspace/xobops-test
+.venv/bin/python scripts/eval_suite.py
+```
+
+Current suite validates:
+- deterministic router intent classification for core intents
+- hard destructive shell blacklist enforcement
+- force-gate behavior
+- shell allowlist enforcement
+- write-root boundary gate enforcement
+
 ---
 
 ## Backup safety (critical)
