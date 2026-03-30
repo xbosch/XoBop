@@ -34,6 +34,18 @@ State, memory, prompts, and cron metadata are persisted in SQLite (`memory.db`).
 
 ---
 
+## Execution modes
+
+| Mode | Intent |
+|---|---|
+| `strict` | deterministic/manual operation, minimal autonomy |
+| `normal` | balanced assistant mode with controlled proactive features |
+| `overseer` | autonomous layer enabled (multimodal artifact indexing, autonomous review jobs) |
+
+Overseer-only behaviors are gated by mode checks to prevent agentic drift in strict/manual workflows.
+
+---
+
 ## Requirements
 
 - Python 3.11+

@@ -21,9 +21,11 @@ This version remains single user by design.
 """
 
 import asyncio
+import base64
 import json
 import logging
 import math
+import mimetypes
 import os
 import re
 import shlex
@@ -137,7 +139,7 @@ client = AsyncOpenAI(api_key=OPENAI_KEY)
 # Policies
 # =============================================================================
 
-MODES = {"strict", "normal"}
+MODES = {"strict", "normal", "overseer"}
 
 _SECRET_RE = re.compile(
     r"(?:"
@@ -604,6 +606,10 @@ def _set_setting(key: str, value: str) -> None:
 
 def _get_mode() -> str:
     return _get_setting("mode", "strict") or "strict"
+
+
+def _overseer_enabled() -> bool:
+    return _get_mode() == "overseer"
 
 
 def _in_quiet_hours() -> bool:
@@ -1747,33 +1753,39 @@ async def _run_cron_job(job_name: str) -> None:
             dst = await loop.run_in_executor(None, lambda: sqlite_online_backup(DB_FILE, backup_dir, repo_dir=repo_dir))
             output = f"DB backup completed: {dst}"
         elif skill_type == "prompt_review":
-            with get_db() as conn:
-                top = conn.execute("SELECT skill_name,call_count,error_count FROM skill_usage_stats ORDER BY error_count DESC, call_count DESC LIMIT 8").fetchall()
-                recent = conn.execute("SELECT tool_name,status,result FROM runs ORDER BY id DESC LIMIT 30").fetchall()
-            payload = {
-                "top_skills": [dict(r) for r in top],
-                "recent_runs": [dict(r) for r in recent],
-            }
-            resp = await client.chat.completions.create(
-                model=MODEL,
-                messages=[
-                    {"role": "system", "content": "Given skill usage and failures, propose a concise strict prompt improvement. Keep under 120 words."},
-                    {"role": "user", "content": json.dumps(payload)[:5000]},
-                ],
-                temperature=0.1,
-                max_tokens=220,
-            )
-            proposal = (resp.choices[0].message.content or "").strip()
-            global _prompt_proposal
-            _prompt_proposal = {"mode": "strict", "text": proposal}
-            output = "Prompt proposal generated and staged. Use /promptapprove or /promptreject."
+            if not _overseer_enabled():
+                output = "Skipped prompt_review (overseer mode disabled)."
+            else:
+                with get_db() as conn:
+                    top = conn.execute("SELECT skill_name,call_count,error_count FROM skill_usage_stats ORDER BY error_count DESC, call_count DESC LIMIT 8").fetchall()
+                    recent = conn.execute("SELECT tool_name,status,result FROM runs ORDER BY id DESC LIMIT 30").fetchall()
+                payload = {
+                    "top_skills": [dict(r) for r in top],
+                    "recent_runs": [dict(r) for r in recent],
+                }
+                resp = await client.chat.completions.create(
+                    model=MODEL,
+                    messages=[
+                        {"role": "system", "content": "Given skill usage and failures, propose a concise strict prompt improvement. Keep under 120 words."},
+                        {"role": "user", "content": json.dumps(payload)[:5000]},
+                    ],
+                    temperature=0.1,
+                    max_tokens=220,
+                )
+                proposal = (resp.choices[0].message.content or "").strip()
+                global _prompt_proposal
+                _prompt_proposal = {"mode": "strict", "text": proposal}
+                output = "Prompt proposal generated and staged. Use /promptapprove or /promptreject."
         elif skill_type == "checkup":
             loop = asyncio.get_running_loop()
             output = await loop.run_in_executor(None, _run_checkup_sync)
         elif skill_type == "system_map_refresh":
-            loop = asyncio.get_running_loop()
-            path = await loop.run_in_executor(None, _generate_system_map_sync)
-            output = f"SYSTEM_MAP refreshed: {path}"
+            if not _overseer_enabled():
+                output = "Skipped system_map_refresh (overseer mode disabled)."
+            else:
+                loop = asyncio.get_running_loop()
+                path = await loop.run_in_executor(None, _generate_system_map_sync)
+                output = f"SYSTEM_MAP refreshed: {path}"
         else:
             raise ValueError(f"Unknown cron skill_type: {skill_type}")
     except Exception as exc:
@@ -1867,6 +1879,37 @@ async def _quicklook_summary(path: Path) -> str:
     return f"File artifact ({size} bytes)."
 
 
+async def _multimodal_artifact_summary(path: Path) -> str:
+    """Best-effort multimodal/metadata summary for overseer indexing."""
+    ext = path.suffix.lower()
+    if ext in {'.jpg', '.jpeg', '.png', '.webp', '.gif'}:
+        try:
+            raw = path.read_bytes()
+            if len(raw) <= 1_500_000:
+                mime = mimetypes.guess_type(str(path))[0] or 'image/jpeg'
+                b64 = base64.b64encode(raw).decode('ascii')
+                data_url = f"data:{mime};base64,{b64}"
+                resp = await client.chat.completions.create(
+                    model=MODEL,
+                    messages=[
+                        {"role": "system", "content": "Describe this image for searchable memory in one concise sentence."},
+                        {"role": "user", "content": [
+                            {"type": "text", "text": "Summarize key visual content."},
+                            {"type": "image_url", "image_url": {"url": data_url}},
+                        ]},
+                    ],
+                    temperature=0.1,
+                    max_tokens=90,
+                )
+                txt = (resp.choices[0].message.content or '').strip()
+                if txt:
+                    return txt
+        except Exception:
+            pass
+    # fallback to quicklook metadata summary
+    return await _quicklook_summary(path)
+
+
 async def _artifact_watch_loop() -> None:
     global _seen_artifacts
     art = Path(ARTIFACT_DIR)
@@ -1889,6 +1932,15 @@ async def _artifact_watch_loop() -> None:
                         await _app.bot.send_document(chat_id=OWNER_ID, document=str(newest), caption="Artifact file")
                 except Exception:
                     pass
+
+                # Overseer-only multimodal indexing into memory.
+                if _overseer_enabled() and newest.suffix.lower() in {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.pdf'}:
+                    try:
+                        desc = await _multimodal_artifact_summary(newest)
+                        mem = f"Artifact summary ({newest.name}): {desc} [path={newest}]"
+                        await _add_memory(mem, mem_type="artifact_summary", importance=0.78, source="artifact_watcher", pinned=False)
+                    except Exception:
+                        pass
         except Exception as exc:
             log.warning("Artifact watcher failed: %s", exc)
         await asyncio.sleep(30)
@@ -2372,7 +2424,7 @@ async def cmd_mode(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await loop.run_in_executor(None, lambda: _set_setting("mode", requested))
         await _reply(update, f"Mode set to *{requested}*.")
     else:
-        await _reply(update, f"Current mode: *{_get_mode()}*. Use `/mode strict` or `/mode normal`.")
+        await _reply(update, f"Current mode: *{_get_mode()}*. Use `/mode strict`, `/mode normal`, or `/mode overseer`.")
 
 
 async def cmd_promptshow(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2388,12 +2440,12 @@ async def cmd_promptset(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     raw = update.message.text.partition(" ")[2].strip()
     if not raw:
-        await _reply(update, "Use: `/promptset <strict|normal> <prompt text>` or `/promptset <strict|normal> reset`")
+        await _reply(update, "Use: `/promptset <strict|normal|overseer> <prompt text>` or `/promptset <mode> reset`")
         return
     parts = raw.split(" ", 1)
     mode = parts[0].strip().lower()
     if mode not in MODES:
-        await _reply(update, "Mode must be `strict` or `normal`.")
+        await _reply(update, "Mode must be `strict`, `normal`, or `overseer`.")
         return
     if len(parts) < 2 or not parts[1].strip():
         await _reply(update, "Missing prompt text. Example: `/promptset strict You are...`")
@@ -2482,7 +2534,7 @@ async def cmd_promptproposal(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
     parts = raw.split(" ", 1)
     mode = parts[0].strip().lower()
     if mode not in MODES:
-        await _reply(update, "Mode must be `strict` or `normal`.")
+        await _reply(update, "Mode must be `strict`, `normal`, or `overseer`.")
         return
     if len(parts) < 2 or not parts[1].strip():
         await _reply(update, "Missing proposal text.")
@@ -2895,10 +2947,10 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 /tasks — list open tasks
 
 *Control*
-/mode [strict|normal] — get or set mode
+/mode [strict|normal|overseer] — get or set mode
 /promptshow — show active runtime prompt
-/promptset mode text — set runtime prompt (strict/normal)
-/promptproposal mode text — stage prompt change proposal
+/promptset mode text — set runtime prompt (strict/normal/overseer)
+/promptproposal mode text — stage prompt change proposal (strict/normal/overseer)
 /promptapprove — apply staged prompt proposal
 /promptreject — reject staged prompt proposal
 /quiethours HH:MM-HH:MM — queue notifications during quiet window
