@@ -3018,6 +3018,9 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             cmd_cronlist=lambda u: cmd_cronlist(u, ctx),
             cmd_cronrun=lambda u: cmd_cronrun(u, ctx),
             cmd_cronruns=lambda u: cmd_cronruns(u, ctx),
+            cmd_status=lambda u: cmd_status(u, ctx),
+            cmd_health=lambda u: cmd_health(u, ctx),
+            cmd_checkup=lambda u: cmd_checkup(u, ctx),
             log=log,
         )
     except Exception as exc:

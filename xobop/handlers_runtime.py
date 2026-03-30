@@ -81,6 +81,9 @@ async def process_text_message(
     cmd_cronlist,
     cmd_cronrun,
     cmd_cronruns,
+    cmd_status,
+    cmd_health,
+    cmd_checkup,
     log,
 ) -> bool:
     if not owner_only(update):
@@ -134,6 +137,15 @@ async def process_text_message(
         return True
     if lower.startswith("/cronruns "):
         await cmd_cronruns(update)
+        return True
+    if lower.startswith("/status"):
+        await cmd_status(update)
+        return True
+    if lower.startswith("/health"):
+        await cmd_health(update)
+        return True
+    if lower.startswith("/checkup"):
+        await cmd_checkup(update)
         return True
 
     intent = classify(text)
