@@ -1,49 +1,181 @@
 # XoBop
 
-XoBop is an owner-only Telegram copilot for local operations.
-It is designed for **deterministic execution first** (commands/workflows/router), with LLM fallback only when structured routes do not apply.
-State, memory, prompts, and cron metadata are persisted in SQLite (`memory.db`).
+XoBop is an owner-only Telegram operations copilot designed for **deterministic control first** and **self-improvement by measured evidence**.
+
+It is not a generic chatbot. It is a local sovereign ops system with:
+- strict safety rails,
+- mode-gated autonomy,
+- auditable execution,
+- and a closed-loop improvement pipeline.
 
 ---
 
-## What it is
+## Core Principles
 
-- A personal operations assistant (single-owner)
-- A memory-backed executor with policy gates
-- A Telegram-native control plane for shell/file/cron/email workflows
-
-## What it does
-
-- Executes operational commands through controlled capabilities
-- Manages facts/tasks/memory and semantic retrieval context
-- Runs DB-backed cron jobs and records execution history (includes default `db-backup-6h`, `prompt-review-weekly`, `checkup-monthly`, and `system-map-weekly` jobs)
-- Handles attachment-aware email workflow (with Gmail env configured)
-- Supports quiet-hours queueing for non-urgent notifications with digest flush
-- Persists pending actions and restores them after restart
-- Enforces hard shell blacklist for destructive command patterns
-- Exposes expanded `/health` metrics (DB size, tasks, last cron statuses, OpenAI latency)
-- Adds host System Pulse in `/health` and `/checkup` (disk/memory/load/temperature status)
-- Adds `/checkup` drift diagnostics and plan-then-execute (`/plan` + `/go`) workflow
-- Auto-refreshes `memory/SYSTEM_MAP.md` weekly via cron
-
-## What it does **not** do
-
-- Multi-user role-based access control (owner-only model)
-- Guaranteed enterprise-grade migration tooling for all legacy DB variants
-- Arbitrary unrestricted shell (raw shell remains policy-gated)
-- External cloud orchestration beyond configured local/runtime capabilities
+1. **Deterministic-first execution**
+   - command handlers / routing / workflows are preferred over freeform LLM behavior.
+2. **Owner-only control surface**
+   - privileged commands are restricted to `OWNER_ID`.
+3. **Safety over convenience**
+   - destructive shell patterns are hard-blocked.
+4. **Measured improvement only**
+   - proposals are generated from telemetry, simulated, compared, then promoted by policy.
 
 ---
 
-## Execution modes
+## System Architecture
 
-| Mode | Intent |
-|---|---|
-| `strict` | deterministic/manual operation, minimal autonomy |
-| `normal` | balanced assistant mode with controlled proactive features |
-| `overseer` | autonomous layer enabled (multimodal artifact indexing, autonomous review jobs) |
+```mermaid
+flowchart TD
+    U[Owner via Telegram] --> T[XoBop.py\nTransport + Command Handlers]
 
-Overseer-only behaviors are gated by mode checks to prevent agentic drift in strict/manual workflows.
+    T --> R[xobop/router.py\nIntent Classification]
+    R --> W[xobop/workflows.py + xobop/state.py\nPending Actions + Runtime State]
+    W --> C[xobop/capabilities_* + emailer + services\nExecution Layer]
+
+    T --> A[_run_agent\nPrompt + Tool Loop]
+    A --> DB[(memory.db)]
+    A --> MEM[memory_items + vectors + FTS]
+
+    S[APScheduler] --> CJ[cron_jobs]
+    CJ --> CR[cron_runs]
+    CJ --> C
+
+    T --> OBS[Observability]\n
+    OBS --> OPE[op_events]
+    OPE --> SIG[op_signals_daily]
+    SIG --> DIAG[/diagnose]
+
+    DIAG --> PROP[improvement_proposals]
+    PROP --> SIM[/improve_simulate]
+    SIM --> RUNS[improvement_runs]
+    RUNS --> CMP[/improve_compare]
+    CMP --> PROM[/improve_promote]
+    PROM --> EVO[evolution_memory]
+
+    PLOCK[/paniclock] --> SAFE[Panic-lock Gate]
+    SAFE --> C
+    SAFE --> CJ
+```
+
+---
+
+## Self-Improvement Loop (v1)
+
+XoBop now implements the ordered 8-step loop:
+
+1. **Instrumentation** (`op_events`)
+2. **Friction metrics** (`op_signals_daily`)
+3. **Diagnosis** (`/diagnose`)
+4. **Proposal generation** (`/improve_propose`)
+5. **Simulation gate** (`/improve_simulate`)
+6. **Impact comparison** (`/improve_compare`)
+7. **Autonomy policy** (`/improve_policy`, `/improve_promote`, `/improve_autopromote`)
+8. **Evolution memory** (`/evolve_capture`, `/evolve_memory`)
+
+This creates a closed loop:
+**observe → diagnose → propose → simulate → compare → promote safely → remember lesson**
+
+---
+
+## Execution Modes
+
+- `strict` — deterministic/manual operations, minimal autonomy
+- `normal` — balanced assistant mode with controlled proactive behavior
+- `overseer` — autonomous layer enabled for selected features
+
+Mode setting:
+- `/mode`
+
+---
+
+## Safety & Security
+
+### Shell safety
+- Hard-blocks destructive patterns (`rm -rf /`, `mkfs`, `dd if=`, `shutdown`, `reboot`, `poweroff`)
+- Raw shell is policy-gated (`ALLOW_RAW_SHELL`)
+- Write-like path checks enforce root boundaries unless forced
+
+### Panic-lock (Kill-Switch v1, non-destructive)
+- `/panicstatus`
+- `/paniclock arm`
+- `/paniclock confirm <token>` (time-limited second step)
+- `/panicunlock <code>` (requires `PANIC_UNLOCK_CODE`)
+
+When panic-lock is ON:
+- execution skills are blocked,
+- cron execution/mutation paths are blocked or skipped,
+- only safety/diagnostic commands are allowed.
+
+---
+
+## Health, Drift, and Diagnostics
+
+### `/health`
+Provides:
+- DB and workload stats
+- task counts
+- cron tail
+- latency/error summaries
+- **System Pulse** (disk/memory/load/temperature)
+
+### `/checkup`
+Dependency/env drift check with pinned project interpreter context:
+- env presence
+- `pip check`
+- runtime code path + git revision
+- system pulse checks
+
+### `/diagnose [days]`
+Operational diagnosis based on telemetry:
+- event/failure summary
+- top failing routes
+- top unknown commands
+- likely-cause hints
+
+---
+
+## Improvement Commands
+
+### Proposal lifecycle
+- `/improve_propose [days]` — create proposal from diagnostics
+- `/improve_list` — list proposals
+- `/improve_simulate <proposal_id>` — run simulation gate
+- `/improve_runs [proposal_id]` — list simulation/impact/promotion runs
+- `/improve_compare <proposal_id> [window_days]` — before/after metrics
+
+### Promotion policy
+- `/improve_policy [manual|assisted|auto_low]`
+- `/improve_promote <proposal_id> [force]`
+- `/improve_autopromote`
+
+### Evolution memory
+- `/evolve_capture <proposal_id>`
+- `/evolve_memory [limit]`
+
+---
+
+## Additional Core Commands
+
+- `/status`
+- `/help`
+- `/exec <command>`
+- `/clearctx`
+- `/topskills`
+
+### Cron
+- `/cronadd name | schedule | skill_type | description | args_json`
+- `/cronrm <name>`
+- `/cronlist`
+- `/cronon <name>`
+- `/cronoff <name>`
+- `/cronrun <name>`
+- `/cronruns <name> [limit]`
+
+### Quiet hours
+- `/quiethours HH:MM-HH:MM`
+- `/quietoff`
+- `/quietflush`
 
 ---
 
@@ -52,13 +184,14 @@ Overseer-only behaviors are gated by mode checks to prevent agentic drift in str
 - Python 3.11+
 - Telegram bot token
 - OpenAI API key
-- Optional for email workflows:
-  - Gmail account with app password
+- Optional Gmail app password (email workflows)
 
-Install:
+---
+
+## Setup
 
 ```bash
-cd xobops-test
+cd /home/xavi/.openclaw/workspace/xobops-test
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -U pip
@@ -67,20 +200,18 @@ cp .env.example .env
 ./run_test.sh
 ```
 
-> `run_test.sh` is the runtime launcher (legacy name), not a unit-test runner.
+> `run_test.sh` is the runtime launcher.
 
 ---
 
-## Configuration
+## Key Environment Variables
 
 Required:
-
 - `TELEGRAM_TOKEN`
 - `OPENAI_API_KEY`
 - `OWNER_ID`
 
-Important options:
-
+Important:
 - `DB_FILE=memory.db`
 - `DEFAULT_MODE=strict`
 - `MODEL=gpt-4.1-mini`
@@ -89,80 +220,10 @@ Important options:
 - `PANIC_UNLOCK_CODE=<high_entropy_secret>`
 - `ALLOWED_WRITE_ROOT=/home/xavi/.openclaw/workspace/xobops-test`
 - `READ_ROOT=/home/xavi/.openclaw/workspace/xobops-test`
-- `GMAIL_EMAIL=...` (optional)
-- `GMAIL_APP_PASSWORD=...` (optional)
-
-### `.env.example`
-
-```env
-TELEGRAM_TOKEN=your_telegram_bot_token
-OPENAI_API_KEY=your_openai_key
-OWNER_ID=5410368885
-GMAIL_EMAIL=your_gmail_address@gmail.com
-GMAIL_APP_PASSWORD=your_16_char_google_app_password
-MODEL=gpt-4.1-mini
-EMBEDDING_MODEL=text-embedding-3-small
-DB_FILE=memory.db
-DEFAULT_MODE=strict
-ARTIFACT_DIR=artifacts
-ALLOWED_WRITE_ROOT=/home/xavi/.openclaw/workspace/xobops-test
-READ_ROOT=/home/xavi/.openclaw/workspace/xobops-test
-ALLOW_RAW_SHELL=0
-EMBEDDING_FALLBACK=1
-FILE_MEMORY_ROOT=/home/xavi/.openclaw/workspace/xobops-test
-LONG_MEMORY_FILE=/home/xavi/.openclaw/workspace/xobops-test/MEMORY.md
-DAILY_MEMORY_DIR=/home/xavi/.openclaw/workspace/xobops-test/memory
-```
 
 ---
 
-## Architecture
-
-### System diagram
-
-```mermaid
-flowchart TD
-    TG[Telegram] --> T[XoBop.py\nTransport + Handlers]
-    T --> R[xobop/router.py\nIntent Classification]
-    R --> W[xobop/workflows.py + state.py\nPending Actions / Runtime State]
-    W --> C[xobop/capabilities_* + emailer + services\nExecution Layer]
-
-    T --> A[_run_agent\nPrompt + Tool Loop]
-    A --> M[(memory.db)]
-    A --> FTS[memory_items_fts\nLexical Fallback]
-
-    S[APScheduler] --> J[cron_jobs / cron_runs]
-    J --> C
-    C --> Q[notification_queue\nQuiet-hours Digest]
-    C --> AR[artifacts/ + backups/]
-```
-
-### Layers
-
-1. **Transport** (`XoBop.py`)
-   - Telegram app wiring, handlers registration, lifecycle hooks
-2. **Routing** (`xobop/router.py`)
-   - Unified action classification (command-like intents)
-3. **Workflow** (`xobop/workflows.py`, `xobop/state.py`)
-   - Pending action progression and runtime state
-4. **Capabilities** (`xobop/capabilities_*.py`, `xobop/emailer.py`, `xobop/services.py`)
-   - Executable operations and adapters
-5. **Agent loop** (`_run_agent`)
-   - Prompt assembly, memory injection, tool loop
-6. **Persistence/Scheduling** (`memory.db`, APScheduler)
-   - Durable state, cron jobs, run logs, queues
-
-### Memory read path
-
-Per turn in `_run_agent`:
-- build query from current user text + up to the last 3 user turns
-- retrieve top-3 semantic memories from `memory_items` + `memory_vectors`
-- inject retrieved memories into prompt context
-- if embedding path degrades, SQLite FTS5 lexical fallback retrieval is used
-
----
-
-## Project structure
+## Project Layout
 
 ```text
 xobops-test/
@@ -178,122 +239,55 @@ xobops-test/
 │   ├── capabilities_shell.py
 │   ├── services.py
 │   └── handlers_runtime.py
-├── .env
-├── .env.example
-├── .gitignore
-├── run_test.sh
-├── requirements.txt
-├── memory.db
 ├── scripts/
+│   ├── smoke_test.sh
 │   ├── smoke_watch.py
-│   └── smoke_test.sh
+│   ├── eval_suite.py
+│   └── build_signals.py
 ├── artifacts/
 ├── backups/
-└── memory/
+├── memory/
+├── .env
+├── .env.example
+├── run_test.sh
+└── memory.db
 ```
 
 ---
 
-## Database highlights
+## Validation Workflows
 
-Main tables:
-- `conversations`, `facts`, `tasks`, `settings`
-- `memory_items`, `memory_vectors`
-- `skills`, `skill_policies`, `skill_usage_stats`, `skill_audit`
-- `runs`, `cron_jobs`, `cron_runs`
-- `global_policies`, `runtime_prompts`, `rate_events`
-- `sessions` (state hydration)
-- `notification_queue` (quiet-hours queue)
-
-Quick schema check:
-
+### Smoke path
 ```bash
-python3 - <<'PY'
-import sqlite3
-con=sqlite3.connect('./memory.db')
-for row in con.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"):
-    print(row[0])
-con.close()
-PY
-```
-
-Migration note:
-- Fresh DB is auto-initialized at startup.
-- Legacy DB upgrades should be tested on a copy first.
-
----
-
-## Commands
-
-Core:
-- `/status`, `/health`, `/checkup`, `/diagnose [days]`, `/improve_propose [days]`, `/improve_list`, `/improve_simulate <id>`, `/improve_runs [id]`, `/improve_compare <id> [days]`, `/improve_policy [manual|assisted|auto_low]`, `/improve_promote <id> [force]`, `/improve_autopromote`, `/evolve_capture <id>`, `/evolve_memory [limit]`, `/help`
-- `/mode`, `/promptshow`, `/promptset`, `/plan`, `/go`
-- `/promptproposal`, `/promptapprove`, `/promptreject`
-- `/exec`
-- `/panicstatus`, `/paniclock arm|confirm <token>`, `/panicunlock <code>`
-- `/cronadd`, `/cronlist`, `/cronrun`, `/cronruns`, `/cronon`, `/cronoff`, `/cronrm`
-
-Memory/tasks/skills:
-- `/remember`, `/delfact`, `/facts`
-- `/memories`, `/memadd`, `/memdel`
-- `/addtask`, `/donetask`, `/tasks`
-- `/skills`, `/skillon`, `/skilloff`, `/clearctx`
-
-Quiet hours:
-- `/quiethours HH:MM-HH:MM`
-- `/quietoff`
-- `/quietflush`
-
-Use `/help` for current runtime command text.
-
----
-
-## Smoke testing
-
-```bash
-cd /home/xavi/.openclaw/workspace/xobops-test
 ./scripts/smoke_test.sh
 ```
 
-- Interactive verifier asks you to send test prompts in Telegram
-- It validates expected replies from DB traces
-- **PASS** => all checks matched
-- **FAIL** => step + reason reported
-
-## Security regression evals (Phase 9)
-
+### Security regression suite
 ```bash
-cd /home/xavi/.openclaw/workspace/xobops-test
 .venv/bin/python scripts/eval_suite.py
 ```
 
-Current suite validates:
-- deterministic router intent classification for core intents
-- hard destructive shell blacklist enforcement
-- force-gate behavior
-- shell allowlist enforcement
-- write-root boundary gate enforcement
-
-## Ops instrumentation + friction signals (Sprint A)
-
+### Friction signal materialization
 ```bash
-cd /home/xavi/.openclaw/workspace/xobops-test
 .venv/bin/python scripts/build_signals.py
 ```
 
-This materializes daily metrics in `op_signals_daily` from `op_events`:
-- total events
-- failures
-- unknown command count
-- retries total
-- median / p95 latency
+---
+
+## Backup Safety
+
+Do not copy live SQLite with plain `cp`.
+Use SQLite online backup (`sqlite3.Connection.backup`) / provided backup flow.
 
 ---
 
-## Backup safety (critical)
+## Current Maturity Snapshot
 
-Do **not** copy a live SQLite DB with plain `cp`.
-Use SQLite online backup API / `.backup`.
+- Deterministic ops control plane: ✅
+- Mode-gated autonomy: ✅
+- Shell safety hardening: ✅
+- Drift + system pulse diagnostics: ✅
+- Unknown command feedback path: ✅
+- Closed-loop self-improvement pipeline (A→G): ✅
 
-XoBop includes `db_backup` cron skill for safe online backups.
-Backup filenames include UTC timestamp and git short hash when available.
+XoBop is now a **high-trust sovereign ops hub** with explicit, testable improvement mechanics.
