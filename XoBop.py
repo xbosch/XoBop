@@ -295,7 +295,10 @@ def _init_db() -> None:
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
                 skill_name TEXT NOT NULL,
                 action TEXT NOT NULL,
-                note TEXT DEFAULT ''
+                note TEXT DEFAULT '',
+                owner_id INTEGER,
+                cmd_input TEXT,
+                exit_code INTEGER
             );
 
             CREATE TABLE IF NOT EXISTS skill_usage_stats (
@@ -388,9 +391,29 @@ def _init_db() -> None:
                 delivered_ts DATETIME
             );
         """)
+        # lightweight schema migrations for additive columns
+        cols = {r['name'] for r in conn.execute("PRAGMA table_info(skill_audit)").fetchall()}
+        for col, typ in (("owner_id", "INTEGER"), ("cmd_input", "TEXT"), ("exit_code", "INTEGER")):
+            if col not in cols:
+                conn.execute(f"ALTER TABLE skill_audit ADD COLUMN {col} {typ}")
     _bootstrap_default_skills()
     _bootstrap_default_policies()
     _bootstrap_default_prompts()
+    # ensure periodic online DB backup job exists (every 6h)
+    with get_db() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO cron_jobs (name,description,cron_expr,skill_type,skill_args,enabled,alert_owner,updated_ts)
+            VALUES (?,?,?,?,?,1,1,CURRENT_TIMESTAMP)
+            """,
+            (
+                "db-backup-6h",
+                "Online SQLite backup every 6 hours",
+                "0 */6 * * *",
+                "db_backup",
+                json.dumps({"backup_dir": str((Path(os.getcwd()) / "backups").resolve()), "repo_dir": os.getcwd()}),
+            ),
+        )
 
 
 # =============================================================================
@@ -435,6 +458,7 @@ DEFAULT_SKILLS: list[dict[str, Any]] = [
             "default_cwd": os.getcwd(),
             "allow_raw_shell": "1" if ALLOW_RAW_SHELL else "0",
             "allowed_commands": "",
+            "write_root": str(ALLOWED_WRITE_ROOT),
         },
     },
     {
@@ -640,11 +664,11 @@ def _set_runtime_prompt(mode: str, prompt_text: str) -> None:
         )
 
 
-def _audit_skill(skill_name: str, action: str, note: str = "") -> None:
+def _audit_skill(skill_name: str, action: str, note: str = "", owner_id: Optional[int] = None, cmd_input: str = "", exit_code: Optional[int] = None) -> None:
     with get_db() as conn:
         conn.execute(
-            "INSERT INTO skill_audit (skill_name,action,note) VALUES (?,?,?)",
-            (skill_name, action, note),
+            "INSERT INTO skill_audit (skill_name,action,note,owner_id,cmd_input,exit_code) VALUES (?,?,?,?,?,?)",
+            (skill_name, action, note, owner_id, cmd_input[:TEXT_LIMIT], exit_code),
         )
 
 
@@ -1629,6 +1653,7 @@ _artifact_task: Optional[asyncio.Task] = None
 _notify_task: Optional[asyncio.Task] = None
 _seen_artifacts: set[str] = set()
 _prompt_proposal: Optional[dict[str, str]] = None
+_last_openai_latency_ms: float = 0.0
 
 
 async def _run_cron_job(job_name: str) -> None:
@@ -1962,6 +1987,18 @@ async def _call_skill(chat_id: int, user_query: str, mode: str, skill_name: str,
         lambda: _update_skill_usage(skill_name, duration_ms, status),
         label=f"skill_usage:{skill_name}",
     )
+    _fire_and_forget(
+        loop,
+        lambda: _audit_skill(
+            skill_name,
+            "call",
+            note=status,
+            owner_id=(OWNER_ID if chat_id != 0 else None),
+            cmd_input=(args.get("command", user_query) if isinstance(args, dict) else user_query),
+            exit_code=exit_code,
+        ),
+        label=f"skill_audit:{skill_name}",
+    )
     return result
 
 
@@ -1996,8 +2033,10 @@ async def _run_agent(chat_id: int, query: str, force: bool = False) -> str:
     final_text = "✓"
     round_count = 0
 
+    global _last_openai_latency_ms
     while round_count < MAX_TOOL_ROUNDS:
         try:
+            t0 = time.monotonic()
             response = await client.chat.completions.create(
                 model=MODEL,
                 messages=messages,
@@ -2006,6 +2045,7 @@ async def _run_agent(chat_id: int, query: str, force: bool = False) -> str:
                 temperature=0.10 if mode == "strict" else 0.25,
                 max_tokens=4096,
             )
+            _last_openai_latency_ms = (time.monotonic() - t0) * 1000.0
         except RateLimitError as exc:
             retry_after = 5
             try:
@@ -2053,12 +2093,14 @@ async def _run_agent(chat_id: int, query: str, force: bool = False) -> str:
     else:
         log.warning("Hit MAX_TOOL_ROUNDS (%d), forcing final reply", MAX_TOOL_ROUNDS)
         try:
+            t1 = time.monotonic()
             final_resp = await client.chat.completions.create(
                 model=MODEL,
                 messages=messages,
                 temperature=0.10 if mode == "strict" else 0.25,
                 max_tokens=512,
             )
+            _last_openai_latency_ms = (time.monotonic() - t1) * 1000.0
             final_text = final_resp.choices[0].message.content or "✓"
         except Exception:
             pass
@@ -2085,20 +2127,29 @@ def _health_report() -> str:
         memories = conn.execute("SELECT COUNT(*) AS n FROM memory_items WHERE is_deleted=0").fetchone()["n"]
         skills = conn.execute("SELECT COUNT(*) AS n FROM skills WHERE enabled=1").fetchone()["n"]
         cron = conn.execute("SELECT COUNT(*) AS n FROM cron_jobs WHERE enabled=1").fetchone()["n"]
+        open_tasks = conn.execute("SELECT COUNT(*) AS n FROM tasks WHERE status='open'").fetchone()["n"]
+        closed_tasks = conn.execute("SELECT COUNT(*) AS n FROM tasks WHERE status='done'").fetchone()["n"]
         errors = conn.execute(
             "SELECT COUNT(*) AS n FROM runs WHERE status!='ok' AND timestamp >= datetime('now', '-1 hour')"
         ).fetchone()["n"]
         avg_ms = conn.execute(
             "SELECT COALESCE(AVG(duration_ms),0) AS v FROM runs WHERE timestamp >= datetime('now', '-1 hour')"
         ).fetchone()["v"]
+        last_cron = conn.execute(
+            "SELECT job_name,status,duration_ms FROM cron_runs ORDER BY id DESC LIMIT 3"
+        ).fetchall()
+    cron_tail = "\n".join([f"  - {r['job_name']}: {'✅' if r['status']=='ok' else '❌'} ({r['duration_ms']}ms)" for r in last_cron]) or "  - none"
     return (
-        f"• DB size: {db_size:,} bytes\n"
+        f"• DB size: {db_size/1024/1024:.2f} MB\n"
         f"• Messages: {messages}\n"
         f"• Memories: {memories}\n"
         f"• Enabled skills: {skills}\n"
         f"• Active cron jobs: {cron}\n"
+        f"• Tasks: open={open_tasks} closed={closed_tasks}\n"
+        f"• OpenAI latency (last): {_last_openai_latency_ms:.1f} ms\n"
         f"• Avg tool latency 1h: {float(avg_ms):.1f} ms\n"
-        f"• Errors 1h: {int(errors)}"
+        f"• Errors 1h: {int(errors)}\n"
+        f"• Last cron runs:\n{cron_tail}"
     )
 
 

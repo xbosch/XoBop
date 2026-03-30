@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import shlex
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
 
@@ -28,6 +29,20 @@ async def exec_shell_command(
     policy = classify_shell(command)
     allowed_commands = [x.strip() for x in policies.get("allowed_commands", "").split(",") if x.strip()]
 
+    # Hard destructive blacklist: never allow these patterns via runtime shell.
+    hard_block = [
+        r"\brm\s+-rf\s+/$",
+        r"\brm\s+-rf\s+/\s",
+        r"\bmkfs(\.|\s)",
+        r"\bdd\s+if=",
+        r"\bshutdown\b",
+        r"\breboot\b",
+        r"\bpoweroff\b",
+    ]
+    for pat in hard_block:
+        if re.search(pat, command, re.I):
+            return f"⛔ Hard-blocked destructive command pattern: {pat}", None, "blocked", None
+
     raw_allowed = policies.get("allow_raw_shell", "0") == "1"
     if raw and not raw_allowed:
         return "⛔ Raw shell disabled by skill policy.", None, "blocked", None
@@ -37,6 +52,16 @@ async def exec_shell_command(
     segments = [s.strip() for s in command.split("&&") if s.strip()]
     if not segments:
         return "⛔ Empty command.", None, "blocked", None
+
+    # Human-in-the-loop gate for write-like operations outside allowed root.
+    write_tokens = ("rm ", "mv ", "cp ", "tee ", "sed -i", ">", "mkdir ", "touch ")
+    write_root = Path(policies.get("write_root") or ".").resolve()
+    for seg in segments:
+        if any(tok in seg for tok in write_tokens):
+            for m in re.findall(r"(/[^\s'\"]+)", seg):
+                p = Path(m).resolve()
+                if p.exists() and not str(p).startswith(str(write_root)) and not user_forced(user_query):
+                    return f"⛔ Write-like command targets path outside allowed root ({write_root}). Add 'force' to proceed. Path: {p}", None, "blocked", None
 
     outputs = [f"Kind: {policy.kind}", f"CWD: {cwd}"]
     last_rc: Optional[int] = 0
