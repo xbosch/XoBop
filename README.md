@@ -1,36 +1,32 @@
 # XoBop
 
-XoBop is an owner-scoped Telegram copilot for local operations and memory-backed assistance.
-It is built to execute practical tasks (shell/file/cron/email workflows) with deterministic routing first and LLM fallback second.
-Typical use is: ask in Telegram, XoBop executes with policy gates, persists context in SQLite, and reports concrete outcomes.
-The goal is operational reliability over chatty behavior.
-
-## Current status
-
-- ✅ Runtime DB name is `memory.db` (no `_v5` naming in active config/code/docs)
-- ✅ Owner-only command surface
-- ✅ Runtime prompts stored in DB (`strict` / `normal`)
-- ✅ Command routing hardening (`/exec`, direct shell intents, cron list intent)
-- ✅ Interactive smoke verification (`scripts/smoke_watch.py`)
+XoBop is an owner-only Telegram copilot for local operations.
+It is designed for **deterministic execution first** (commands/workflows/router), with LLM fallback only when structured routes do not apply.
+State, memory, prompts, and cron metadata are persisted in SQLite (`memory.db`).
 
 ---
 
-## Features
+## What it is
 
-- Telegram bot with owner gate (`OWNER_ID`)
-- Two runtime modes: `strict`, `normal`
-- Runtime prompt control:
-  - `/promptshow`
-  - `/promptset <mode> <text|reset>`
-- Hybrid memory in SQLite:
-  - chat transcript
-  - semantic memory + vectors
-- Skill/tool execution with policy checks
-- DB-backed cron scheduler (APScheduler + `cron_jobs`/`cron_runs`)
-- Online SQLite backup capability (`db_backup` cron skill, uses SQLite backup API)
-- Pending action hydration across restarts (session snapshot in `sessions` table)
-- Artifact watcher that notifies owner when new files appear in `artifacts/`
-- Quiet-hours notification queue (stores alerts in `notification_queue`, flushes later)
+- A personal operations assistant (single-owner)
+- A memory-backed executor with policy gates
+- A Telegram-native control plane for shell/file/cron/email workflows
+
+## What it does
+
+- Executes operational commands through controlled capabilities
+- Manages facts/tasks/memory and semantic retrieval context
+- Runs DB-backed cron jobs and records execution history
+- Handles attachment-aware email workflow (with Gmail env configured)
+- Supports quiet-hours queueing for non-urgent notifications
+- Persists pending actions and restores them after restart
+
+## What it does **not** do
+
+- Multi-user role-based access control (owner-only model)
+- Guaranteed enterprise-grade migration tooling for all legacy DB variants
+- Arbitrary unrestricted shell (raw shell remains policy-gated)
+- External cloud orchestration beyond configured local/runtime capabilities
 
 ---
 
@@ -39,6 +35,8 @@ The goal is operational reliability over chatty behavior.
 - Python 3.11+
 - Telegram bot token
 - OpenAI API key
+- Optional for email workflows:
+  - Gmail account with app password
 
 Install:
 
@@ -49,15 +47,14 @@ source .venv/bin/activate
 pip install -U pip
 pip install -r requirements.txt
 cp .env.example .env
-# set TELEGRAM_TOKEN, OPENAI_API_KEY, OWNER_ID (and Gmail vars if email workflows are used)
 ./run_test.sh
 ```
 
-> Note: `run_test.sh` is the runtime launcher (legacy name), not a unit-test runner.
+> `run_test.sh` is the runtime launcher (legacy name), not a unit-test runner.
 
 ---
 
-## Configuration (`.env`)
+## Configuration
 
 Required:
 
@@ -65,19 +62,19 @@ Required:
 - `OPENAI_API_KEY`
 - `OWNER_ID`
 
-Important defaults/options:
+Important options:
 
 - `DB_FILE=memory.db`
+- `DEFAULT_MODE=strict`
 - `MODEL=gpt-4.1-mini`
 - `EMBEDDING_MODEL=text-embedding-3-small`
-- `DEFAULT_MODE=strict`
 - `ALLOW_RAW_SHELL=0`
 - `ALLOWED_WRITE_ROOT=/home/xavi/.openclaw/workspace/xobops-test`
 - `READ_ROOT=/home/xavi/.openclaw/workspace/xobops-test`
-- `GMAIL_EMAIL=...` (optional, needed for email workflows)
-- `GMAIL_APP_PASSWORD=...` (optional, needed for email workflows)
+- `GMAIL_EMAIL=...` (optional)
+- `GMAIL_APP_PASSWORD=...` (optional)
 
-### `.env.example` (canonical template)
+### `.env.example`
 
 ```env
 TELEGRAM_TOKEN=your_telegram_bot_token
@@ -101,58 +98,77 @@ DAILY_MEMORY_DIR=/home/xavi/.openclaw/workspace/xobops-test/memory
 
 ---
 
+## Architecture
+
+### Layers
+
+1. **Transport** (`XoBop.py`)
+   - Telegram app wiring, handlers registration, lifecycle hooks
+2. **Routing** (`xobop/router.py`)
+   - Unified action classification (command-like intents)
+3. **Workflow** (`xobop/workflows.py`, `xobop/state.py`)
+   - Pending action progression and runtime state
+4. **Capabilities** (`xobop/capabilities_*.py`, `xobop/emailer.py`, `xobop/services.py`)
+   - Executable operations and adapters
+5. **Agent loop** (`_run_agent`)
+   - Prompt assembly, memory injection, tool loop
+6. **Persistence/Scheduling** (`memory.db`, APScheduler)
+   - Durable state, cron jobs, run logs, queues
+
+### Memory read path
+
+Per turn in `_run_agent`:
+- build query from user text
+- retrieve semantic memory from `memory_items` + `memory_vectors`
+- inject top results into prompt context
+- if embedding path degrades, lexical fallback retrieval is used
+
+---
+
 ## Project structure
 
 ```text
 xobops-test/
-├── XoBop.py                 # Main entrypoint/app wiring
+├── XoBop.py
 ├── xobop/
-│   ├── router.py            # Unified action parser/classifier
-│   ├── state.py             # Runtime state store (pending actions, last results)
-│   ├── db.py                # SQLite session helper (WAL/busy_timeout/commit-rollback)
-│   ├── intents.py           # Intent extraction utilities (email fields, refs)
-│   ├── workflows.py         # Generic workflow engine (pending action progression)
-│   ├── emailer.py           # SMTP email send helper
-│   ├── capabilities_fs.py   # Filesystem capabilities (e.g., count entries)
-│   ├── capabilities_shell.py# Shell execution capability with unified result contract
-│   ├── services.py          # Intent service adapters (download/shell/git flows)
-│   └── handlers_runtime.py  # Transport-agnostic message/media processing routines
-├── run_test.sh              # Launcher
-├── .env                     # Secrets (ignored)
-├── .env.example             # Template
-├── .gitignore               # Ignore rules for secrets/runtime artifacts
+│   ├── router.py
+│   ├── state.py
+│   ├── db.py
+│   ├── intents.py
+│   ├── workflows.py
+│   ├── emailer.py
+│   ├── capabilities_fs.py
+│   ├── capabilities_shell.py
+│   ├── services.py
+│   └── handlers_runtime.py
+├── .env
+├── .env.example
+├── .gitignore
+├── run_test.sh
 ├── requirements.txt
-├── memory.db                # Runtime DB (ignored)
-├── memory.db-shm/.wal       # SQLite runtime files (ignored)
+├── memory.db
 ├── scripts/
-│   ├── smoke_watch.py       # Interactive smoke verifier
-│   └── smoke_test.sh        # Wrapper for smoke_watch
-├── artifacts/               # Runtime artifacts (ignored)
-├── backups/                 # DB backups (ignored)
-└── memory/                  # File memory notes (ignored)
+│   ├── smoke_watch.py
+│   └── smoke_test.sh
+├── artifacts/
+├── backups/
+└── memory/
 ```
 
 ---
 
-## Database structure (`memory.db`)
+## Database highlights
 
-Primary tables used by runtime:
+Main tables:
+- `conversations`, `facts`, `tasks`, `settings`
+- `memory_items`, `memory_vectors`
+- `skills`, `skill_policies`, `skill_usage_stats`, `skill_audit`
+- `runs`, `cron_jobs`, `cron_runs`
+- `global_policies`, `runtime_prompts`, `rate_events`
+- `sessions` (state hydration)
+- `notification_queue` (quiet-hours queue)
 
-- `conversations` — chat transcript (`chat_id`, `role`, `content`, `timestamp`)
-- `memory_items` — semantic memory entries (`text`, `mem_type`, `importance`, `source`, `pinned`, `is_deleted`)
-- `memory_vectors` — embedding vectors linked to `memory_items`
-- `settings` — runtime settings (e.g., active mode)
-- `runtime_prompts` — prompt text per mode (`strict`, `normal`)
-- `global_policies` — safety/limits config
-- `skills` — enabled skill registry + metadata
-- `skill_policies` — per-skill policy overrides
-- `runs` — tool execution logs
-- `tasks` — open/closed task tracking
-- `cron_jobs` — scheduled jobs (`name`, `cron_expr`, `skill_type`, `skill_args`, state)
-- `cron_runs` — cron execution history
-- `rate_events` — rate-limit accounting buckets
-
-Quick schema inspection:
+Quick schema check:
 
 ```bash
 python3 - <<'PY'
@@ -164,130 +180,53 @@ con.close()
 PY
 ```
 
-### Migration note
-
-- Current runtime expects `DB_FILE` schema created/managed by `_init_db` at startup.
-- Fresh DBs are auto-initialized.
-- Legacy DB migration from older versions is not fully automated/documented yet; test on a copy first.
-
----
-
-## Architecture layers
-
-1. **Transport layer** (`XoBop.py` handlers)
-   - Telegram updates, commands, media intake, error handling
-2. **Routing layer** (`xobop/router.py`)
-   - unified intent/action classification
-3. **Workflow layer** (`xobop/workflows.py`, `xobop/state.py`)
-   - pending actions, continuation, status tracking
-4. **Capability layer** (`xobop/capabilities_*.py`, `xobop/emailer.py`)
-   - shell/files/email executable operations
-5. **Agent layer** (`_run_agent` in `XoBop.py`)
-   - Memory read path: semantic retrieval from `memory_items` + `memory_vectors` via `_build_memory_block`
-   - Injects relevant memories into system context before LLM call
-   - LLM + tool loop when structured routes do not apply
-6. **Persistence/scheduling layer** (`memory.db`, APScheduler)
-   - durable state, cron jobs, run history
-
-## Runtime flow
-
-1. Telegram update arrives
-2. Owner check
-3. Routing:
-   - command handlers (`/status`, `/cron*`, `/prompt*`, etc.)
-   - structured router/actions (deterministic)
-   - fallback to `_run_agent()` for general chat/tool loop
-4. In `_run_agent()`, memory read path runs first:
-   - query embeddings + similarity retrieval from `memory_items`/`memory_vectors`
-   - relevant memories are injected into prompt context
-5. Persistence in `memory.db`
-6. Scheduler runs `cron_jobs`, writes `cron_runs`
+Migration note:
+- Fresh DB is auto-initialized at startup.
+- Legacy DB upgrades should be tested on a copy first.
 
 ---
 
 ## Commands
 
-Core examples:
+Core:
+- `/status`, `/health`, `/help`
+- `/mode`, `/promptshow`, `/promptset`
+- `/promptproposal`, `/promptapprove`, `/promptreject`
+- `/exec`
+- `/cronadd`, `/cronlist`, `/cronrun`, `/cronruns`, `/cronon`, `/cronoff`, `/cronrm`
 
-- `/status`
-- `/mode strict|normal`
-- `/promptshow`
-- `/promptset strict|normal <text|reset>`
+Memory/tasks/skills:
+- `/remember`, `/delfact`, `/facts`
+- `/memories`, `/memadd`, `/memdel`
+- `/addtask`, `/donetask`, `/tasks`
+- `/skills`, `/skillon`, `/skilloff`, `/clearctx`
+
+Quiet hours:
 - `/quiethours HH:MM-HH:MM`
 - `/quietoff`
 - `/quietflush`
-- `/exec <command>`
-- `/cronadd ...`
-- `/cronlist`
-- `/cronrun <name>`
-- `/cronruns <name> [limit]`
 
-Additional supported commands include memory/task/skill controls such as:
-
-- `/remember`, `/delfact`, `/facts`
-- `/addtask`, `/donetask`, `/tasks`
-- `/memories`, `/memadd`, `/memdel`
-- `/skills`, `/skillon`, `/skilloff`
-- `/clearctx`, `/help`
-
-For complete and current command list, use `/help` in Telegram.
+Use `/help` for current runtime command text.
 
 ---
 
 ## Smoke testing
-
-Run:
 
 ```bash
 cd /home/xavi/.openclaw/workspace/xobops-test
 ./scripts/smoke_test.sh
 ```
 
-What it does:
-- launches interactive verifier (`smoke_watch.py`)
-- prompts you to send command + free-text checks in Telegram
-- validates assistant replies via `memory.db`
-
-Interpretation:
-- **PASS**: all prompted checks matched expected output tokens
-- **FAIL**: script prints failing step + missing token or timeout reason
+- Interactive verifier asks you to send test prompts in Telegram
+- It validates expected replies from DB traces
+- **PASS** => all checks matched
+- **FAIL** => step + reason reported
 
 ---
 
 ## Backup safety (critical)
 
-Do **not** use `cp memory.db ...` while bot is running.
+Do **not** copy a live SQLite DB with plain `cp`.
+Use SQLite online backup API / `.backup`.
 
-Use SQLite-safe backup methods (`sqlite3 .backup` or Python `sqlite3.Connection.backup`) to avoid corruption.
-
----
-
-## Architecture diagram
-
-```mermaid
-%%{init: {'flowchart': {'useMaxWidth': true, 'nodeSpacing': 22, 'rankSpacing': 28}, 'theme': 'default'}}%%
-flowchart LR
-    U[Owner user] --> T[Telegram update]
-    T --> R{Route type}
-
-    R --> C[Command handlers]
-    R --> D[Deterministic intents]
-    R --> A[_run_agent]
-
-    C --> DB[(memory.db)]
-    D --> S[Skill executor]
-    A --> MR[Memory retrieval\n(memory_items + vectors)]
-    MR --> A
-    A --> L[LLM]
-    L --> S
-    S --> DB
-
-    J[APScheduler] --> CJ[cron_jobs]
-    CJ --> S
-    S --> CR[cron_runs]
-    CR --> DB
-
-    C --> O[Reply]
-    D --> O
-    A --> O
-```
+XoBop includes `db_backup` cron skill for safe online backups.

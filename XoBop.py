@@ -1628,6 +1628,7 @@ _state_task: Optional[asyncio.Task] = None
 _artifact_task: Optional[asyncio.Task] = None
 _notify_task: Optional[asyncio.Task] = None
 _seen_artifacts: set[str] = set()
+_prompt_proposal: Optional[dict[str, str]] = None
 
 
 async def _run_cron_job(job_name: str) -> None:
@@ -2280,6 +2281,51 @@ async def cmd_quietflush(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     await _reply(update, f"Flushed {sent} queued notifications.")
 
 
+async def cmd_promptproposal(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    global _prompt_proposal
+    if not _owner_only(update):
+        return
+    raw = update.message.text.partition(" ")[2].strip()
+    if not raw:
+        if _prompt_proposal:
+            await _reply(update, f"Pending proposal: mode={_prompt_proposal['mode']} chars={len(_prompt_proposal['text'])}. Use `/promptapprove` or `/promptreject`.")
+        else:
+            await _reply(update, "Use: `/promptproposal <strict|normal> <text>`")
+        return
+    parts = raw.split(" ", 1)
+    mode = parts[0].strip().lower()
+    if mode not in MODES:
+        await _reply(update, "Mode must be `strict` or `normal`.")
+        return
+    if len(parts) < 2 or not parts[1].strip():
+        await _reply(update, "Missing proposal text.")
+        return
+    _prompt_proposal = {"mode": mode, "text": parts[1].strip()}
+    await _reply(update, f"📝 Proposal stored for {mode} ({len(parts[1].strip())} chars). Run `/promptapprove` to apply or `/promptreject` to discard.")
+
+
+async def cmd_promptapprove(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    global _prompt_proposal
+    if not _owner_only(update):
+        return
+    if not _prompt_proposal:
+        await _reply(update, "No pending prompt proposal.")
+        return
+    mode = _prompt_proposal["mode"]
+    text = _prompt_proposal["text"]
+    _set_runtime_prompt(mode, text)
+    _prompt_proposal = None
+    await _reply(update, f"✅ Proposal applied to {mode} prompt.")
+
+
+async def cmd_promptreject(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    global _prompt_proposal
+    if not _owner_only(update):
+        return
+    _prompt_proposal = None
+    await _reply(update, "✅ Prompt proposal discarded.")
+
+
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _owner_only(update):
         return
@@ -2571,6 +2617,9 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 /mode [strict|normal] — get or set mode
 /promptshow — show active runtime prompt
 /promptset mode text — set runtime prompt (strict/normal)
+/promptproposal mode text — stage prompt change proposal
+/promptapprove — apply staged prompt proposal
+/promptreject — reject staged prompt proposal
 /quiethours HH:MM-HH:MM — queue notifications during quiet window
 /quietoff — disable quiet hours
 /quietflush — flush queued notifications now
@@ -2734,6 +2783,9 @@ def main() -> None:
     app.add_handler(CommandHandler("mode", cmd_mode))
     app.add_handler(CommandHandler("promptshow", cmd_promptshow))
     app.add_handler(CommandHandler("promptset", cmd_promptset))
+    app.add_handler(CommandHandler("promptproposal", cmd_promptproposal))
+    app.add_handler(CommandHandler("promptapprove", cmd_promptapprove))
+    app.add_handler(CommandHandler("promptreject", cmd_promptreject))
     app.add_handler(CommandHandler("quiethours", cmd_quiethours))
     app.add_handler(CommandHandler("quietoff", cmd_quietoff))
     app.add_handler(CommandHandler("quietflush", cmd_quietflush))
