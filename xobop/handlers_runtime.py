@@ -98,6 +98,7 @@ async def process_text_message(
     cmd_improve_promote,
     cmd_improve_autopromote,
     cmd_improve_funnel,
+    cmd_improve_eval_report,
     cmd_evolve_capture,
     cmd_evolve_memory,
     cmd_panicstatus,
@@ -234,6 +235,10 @@ async def process_text_message(
     if lower.startswith("/improve_funnel"):
         op_event("route_selected", chat_id=chat_id, route="cmd_improve_funnel")
         await cmd_improve_funnel(update)
+        return True
+    if lower.startswith("/improve_eval_report"):
+        op_event("route_selected", chat_id=chat_id, route="cmd_improve_eval_report")
+        await cmd_improve_eval_report(update)
         return True
     if lower.startswith("/evolve_capture"):
         op_event("route_selected", chat_id=chat_id, route="cmd_evolve_capture")

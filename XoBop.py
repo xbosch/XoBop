@@ -326,6 +326,23 @@ def _init_db() -> None:
                 notes TEXT DEFAULT ''
             );
 
+            CREATE TABLE IF NOT EXISTS simulation_case_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL,
+                proposal_id INTEGER NOT NULL,
+                case_id TEXT NOT NULL,
+                case_class TEXT NOT NULL,
+                expected TEXT DEFAULT '',
+                actual TEXT DEFAULT '',
+                improved INTEGER NOT NULL DEFAULT 0,
+                regressed INTEGER NOT NULL DEFAULT 0,
+                blocked INTEGER NOT NULL DEFAULT 0,
+                policy_ok INTEGER NOT NULL DEFAULT 1,
+                created_ts DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_sim_case_results_run ON simulation_case_results(run_id);
+            CREATE INDEX IF NOT EXISTS idx_sim_case_results_proposal ON simulation_case_results(proposal_id, created_ts);
+
             CREATE TABLE IF NOT EXISTS change_artifacts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 proposal_id INTEGER NOT NULL,
@@ -3126,7 +3143,7 @@ def _simulate_proposal_sync(proposal_id: int) -> str:
         after = {k: {"ok": ok, "note": note} for k, ok, note in checks}
         if shell_replay_report is not None:
             after["shell_replay_report"] = shell_replay_report
-        conn.execute(
+        cur = conn.execute(
             """
             INSERT INTO improvement_runs(proposal_id,phase,status,before_json,after_json,notes)
             VALUES(?, 'simulation', ?, ?, ?, ?)
@@ -3139,6 +3156,50 @@ def _simulate_proposal_sync(proposal_id: int) -> str:
                 "simulation gate",
             ),
         )
+        run_id = int(cur.lastrowid)
+        if shell_replay_report is not None:
+            for r in shell_replay_report.get("replay_results", []):
+                exp_ok = bool(r.get("expect_ok", True))
+                act_ok = bool(r.get("actual_ok", False))
+                conn.execute(
+                    """
+                    INSERT INTO simulation_case_results(run_id,proposal_id,case_id,case_class,expected,actual,improved,regressed,blocked,policy_ok)
+                    VALUES(?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        run_id,
+                        proposal_id,
+                        str(r.get("case_id", "")),
+                        str(r.get("case_class", "targeted")),
+                        ("ok" if exp_ok else "fail"),
+                        ("ok" if act_ok else "fail"),
+                        int(exp_ok == act_ok),
+                        int(exp_ok != act_ok),
+                        int(not act_ok),
+                        int(bool(r.get("policy_ok", False))),
+                    ),
+                )
+            for g in shell_replay_report.get("golden_results", []):
+                exp_ok = bool(g.get("expected_ok", True))
+                act_ok = bool(g.get("actual_ok", False))
+                conn.execute(
+                    """
+                    INSERT INTO simulation_case_results(run_id,proposal_id,case_id,case_class,expected,actual,improved,regressed,blocked,policy_ok)
+                    VALUES(?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        run_id,
+                        proposal_id,
+                        str(g.get("case_id", "")),
+                        "golden",
+                        ("ok" if exp_ok else "fail"),
+                        ("ok" if act_ok else "fail"),
+                        int(exp_ok == act_ok),
+                        int(exp_ok != act_ok),
+                        int(not act_ok),
+                        int(exp_ok == act_ok),
+                    ),
+                )
 
     lines = [f"Simulation for proposal #{proposal_id}: {'PASS' if overall else 'FAIL'}"]
     for name, ok, note in checks:
@@ -3214,11 +3275,38 @@ def _impact_compare_sync(proposal_id: int, window_days: int = 7) -> str:
         delta_unknown = a_unk - b_unk
         delta_lat = a_lat - b_lat
 
+        art = conn.execute(
+            "SELECT artifact_type,target FROM change_artifacts WHERE proposal_id=? ORDER BY id DESC LIMIT 1",
+            (proposal_id,),
+        ).fetchone()
+        artifact_type = (art["artifact_type"] if art else "") or ""
+
+        # Artifact-family focused metrics
+        family = {}
+        if artifact_type == "routing_rule":
+            b_uk = conn.execute(
+                "SELECT COUNT(*) AS n FROM op_events WHERE timestamp >= datetime(?, ?) AND timestamp < datetime(?) AND event_type='unknown_command'",
+                (ts, f"-{w} day", ts),
+            ).fetchone()["n"]
+            a_uk = conn.execute(
+                "SELECT COUNT(*) AS n FROM op_events WHERE timestamp >= datetime(?) AND timestamp < datetime(?, ?) AND event_type='unknown_command'",
+                (ts, ts, f"+{w} day"),
+            ).fetchone()["n"]
+            family = {"family": "alias", "unknown_command_before": int(b_uk or 0), "unknown_command_after": int(a_uk or 0), "delta": int(a_uk or 0) - int(b_uk or 0)}
+        elif artifact_type == "config_change":
+            family = {"family": "retry", "fail_rate_delta": delta_fail_rate, "avg_latency_delta": delta_lat}
+
+        min_samples = 20
+        confidence = "high" if min(b_events, a_events) >= min_samples else "low"
+
         summary = {
             "window_days": w,
             "before": {"events": b_events, "fail_rate": b_rate, "unknowns": b_unk, "avg_latency": b_lat},
             "after": {"events": a_events, "fail_rate": a_rate, "unknowns": a_unk, "avg_latency": a_lat},
             "delta": {"fail_rate": delta_fail_rate, "unknowns": delta_unknown, "avg_latency": delta_lat},
+            "artifact_family": family,
+            "confidence": confidence,
+            "min_samples_required": min_samples,
         }
 
         status = "ok"
@@ -3252,6 +3340,10 @@ def _impact_compare_sync(proposal_id: int, window_days: int = 7) -> str:
     else:
         improved = (delta_fail_rate <= 0.0) and (delta_unknown <= 0.0)
         lines.append(f"Assessment: {'improved' if improved else 'mixed/regressed'}")
+    if min(b_events, a_events) < 20:
+        lines.append("Confidence: LOW (sample threshold not met)")
+    else:
+        lines.append("Confidence: HIGH")
     return "\n".join(lines)
 
 
@@ -3512,6 +3604,10 @@ def _improve_funnel_report(days: int = 30) -> str:
             "SELECT COUNT(DISTINCT proposal_id) AS n FROM change_artifacts WHERE created_ts >= datetime('now', ?)",
             (f"-{d} day",),
         ).fetchone()["n"]
+        artifacts_compiled = conn.execute(
+            "SELECT COUNT(*) AS n FROM change_artifacts WHERE created_ts >= datetime('now', ?)",
+            (f"-{d} day",),
+        ).fetchone()["n"]
         sim_pass = conn.execute(
             "SELECT COUNT(DISTINCT proposal_id) AS n FROM improvement_runs WHERE phase='simulation' AND status='ok' AND created_ts >= datetime('now', ?)",
             (f"-{d} day",),
@@ -3520,30 +3616,133 @@ def _improve_funnel_report(days: int = 30) -> str:
             "SELECT COUNT(DISTINCT proposal_id) AS n FROM improvement_runs WHERE phase='promotion' AND status='ok' AND created_ts >= datetime('now', ?)",
             (f"-{d} day",),
         ).fetchone()["n"]
-        positive = conn.execute(
-            """
-            SELECT COUNT(*) AS n FROM improvement_runs
-            WHERE phase='impact_compare' AND status='ok' AND created_ts >= datetime('now', ?)
-              AND notes LIKE '%"fail_rate":-%'
-            """,
+
+        impact_rows = conn.execute(
+            "SELECT status, notes FROM improvement_runs WHERE phase='impact_compare' AND created_ts >= datetime('now', ?)",
             (f"-{d} day",),
-        ).fetchone()["n"]
-        neutral_or_rollback = conn.execute(
-            "SELECT COUNT(*) AS n FROM improvement_runs WHERE phase='impact_compare' AND status!='ok' AND created_ts >= datetime('now', ?)",
+        ).fetchall()
+
+        drift_repairs = conn.execute(
+            "SELECT COUNT(*) AS n FROM op_events WHERE event_type='state_repair' AND timestamp >= datetime('now', ?)",
             (f"-{d} day",),
         ).fetchone()["n"]
 
+        family_rows = conn.execute(
+            "SELECT artifact_type, COUNT(*) AS n FROM change_artifacts WHERE created_ts >= datetime('now', ?) GROUP BY artifact_type",
+            (f"-{d} day",),
+        ).fetchall()
+
+    positive = 0
+    neutral = 0
+    negative = 0
+    for r in impact_rows:
+        if r["status"] != "ok":
+            neutral += 1
+            continue
+        note = (r["notes"] or "")
+        dlt = {}
+        if note.startswith("delta="):
+            try:
+                dlt = json.loads(note[len("delta="):])
+            except Exception:
+                dlt = {}
+        fail_delta = float(dlt.get("fail_rate", 0.0)) if isinstance(dlt, dict) else 0.0
+        if fail_delta < 0:
+            positive += 1
+        elif fail_delta > 0:
+            negative += 1
+        else:
+            neutral += 1
+
     actionable_rate = (100.0 * actionable / generated) if generated else 0.0
     success_rate = (100.0 * positive / promoted) if promoted else 0.0
+    fam = ", ".join([f"{r['artifact_type']}={int(r['n'])}" for r in family_rows]) or "none"
     return (
         f"Improve funnel ({d}d)\n"
         f"• proposals_generated: {int(generated)}\n"
         f"• proposals_actionable: {int(actionable)} ({actionable_rate:.1f}%)\n"
-        f"• artifacts_compiled: {int(actionable)}\n"
+        f"• artifacts_compiled: {int(artifacts_compiled)}\n"
         f"• simulations_passed: {int(sim_pass)}\n"
         f"• promotions_applied: {int(promoted)}\n"
         f"• changes_positive_impact: {int(positive)} (of applied: {success_rate:.1f}%)\n"
-        f"• changes_rolledback_or_neutral: {int(neutral_or_rollback)}"
+        f"• changes_neutral: {int(neutral)}\n"
+        f"• changes_negative: {int(negative)}\n"
+        f"• drift_repair_events: {int(drift_repairs)}\n"
+        f"• artifact_families: {fam}"
+    )
+
+
+def _improve_eval_report(days: int = 30) -> str:
+    d = max(1, min(days, 90))
+    with get_db() as conn:
+        non_actionable = conn.execute(
+            """
+            SELECT COUNT(*) AS n
+            FROM improvement_proposals p
+            WHERE p.created_ts >= datetime('now', ?)
+              AND NOT EXISTS (SELECT 1 FROM change_artifacts a WHERE a.proposal_id = p.id)
+            """,
+            (f"-{d} day",),
+        ).fetchone()["n"]
+        alias_cases = conn.execute(
+            """
+            SELECT
+              SUM(CASE WHEN improved=1 THEN 1 ELSE 0 END) AS improved,
+              SUM(CASE WHEN regressed=1 THEN 1 ELSE 0 END) AS regressed
+            FROM simulation_case_results
+            WHERE created_ts >= datetime('now', ?)
+              AND case_class='targeted'
+              AND run_id IN (
+                SELECT r.id FROM improvement_runs r
+                JOIN change_artifacts a ON a.proposal_id=r.proposal_id
+                WHERE r.phase='simulation' AND a.artifact_type='routing_rule'
+              )
+            """,
+            (f"-{d} day",),
+        ).fetchone()
+        retry_imp = conn.execute(
+            """
+            SELECT notes FROM improvement_runs
+            WHERE phase='impact_compare' AND created_ts >= datetime('now', ?)
+              AND proposal_id IN (
+                SELECT proposal_id FROM change_artifacts WHERE artifact_type='config_change'
+              )
+            """,
+            (f"-{d} day",),
+        ).fetchall()
+
+    alias_improved = int(alias_cases["improved"] or 0)
+    alias_regressed = int(alias_cases["regressed"] or 0)
+
+    retry_count = 0
+    retry_fail_delta = 0.0
+    retry_lat_delta = 0.0
+    for r in retry_imp:
+        note = (r["notes"] or "")
+        if not note.startswith("delta="):
+            continue
+        try:
+            dlt = json.loads(note[len("delta="):])
+        except Exception:
+            continue
+        retry_count += 1
+        retry_fail_delta += float(dlt.get("fail_rate", 0.0))
+        retry_lat_delta += float(dlt.get("avg_latency", 0.0))
+
+    retry_avg_fail = (retry_fail_delta / retry_count) if retry_count else 0.0
+    retry_avg_lat = (retry_lat_delta / retry_count) if retry_count else 0.0
+
+    return (
+        f"Improve eval report ({d}d)\n"
+        f"{_improve_funnel_report(d)}\n"
+        f"---\n"
+        f"• non_actionable_proposals: {int(non_actionable)}\n"
+        f"• alias_targeted_improved: {alias_improved}\n"
+        f"• alias_targeted_regressed: {alias_regressed}\n"
+        f"• retry_eval_count: {retry_count}\n"
+        f"• retry_avg_fail_rate_delta_pp: {retry_avg_fail:+.2f}\n"
+        f"• retry_avg_latency_delta_ms: {retry_avg_lat:+.1f}\n"
+        f"• note: low-sample outputs should be interpreted cautiously"
     )
 
 
@@ -3982,7 +4181,9 @@ async def cmd_state_check(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
 async def cmd_state_repair(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _owner_only(update):
         return
-    await _reply(update, _repair_state_from_snapshot())
+    rep = _repair_state_from_snapshot()
+    _record_op_event("state_repair", chat_id=update.effective_chat.id, status=("ok" if rep.startswith("✅") else "error"))
+    await _reply(update, rep)
 
 
 async def cmd_diagnose(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4170,6 +4371,17 @@ async def cmd_improve_funnel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
     except Exception:
         days = 30
     await _reply(update, _improve_funnel_report(days))
+
+
+async def cmd_improve_eval_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _owner_only(update):
+        return
+    raw = update.message.text.partition(" ")[2].strip()
+    try:
+        days = int(raw) if raw else 30
+    except Exception:
+        days = 30
+    await _reply(update, _improve_eval_report(days))
 
 
 async def cmd_evolve_capture(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4557,6 +4769,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 /improve_promote <proposal_id> [force] — promote proposal with risk-policy checks
 /improve_autopromote — auto-promote low-risk proposals (policy=auto_low)
 /improve_funnel [days] — report proposal→artifact→simulation→promotion→impact funnel
+/improve_eval_report [days] — consolidated evaluation report for paper/stability
 /evolve_capture <proposal_id> — persist proposal outcome lesson into evolution memory
 /evolve_memory [limit] — show recent evolution memory lessons
 /plan goal — create execution manifest
@@ -4663,6 +4876,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             cmd_improve_promote=lambda u: cmd_improve_promote(u, ctx),
             cmd_improve_autopromote=lambda u: cmd_improve_autopromote(u, ctx),
             cmd_improve_funnel=lambda u: cmd_improve_funnel(u, ctx),
+            cmd_improve_eval_report=lambda u: cmd_improve_eval_report(u, ctx),
             cmd_evolve_capture=lambda u: cmd_evolve_capture(u, ctx),
             cmd_evolve_memory=lambda u: cmd_evolve_memory(u, ctx),
             cmd_panicstatus=lambda u: cmd_panicstatus(u, ctx),
@@ -4830,6 +5044,7 @@ def main() -> None:
     app.add_handler(CommandHandler("improve_promote", cmd_improve_promote))
     app.add_handler(CommandHandler("improve_autopromote", cmd_improve_autopromote))
     app.add_handler(CommandHandler("improve_funnel", cmd_improve_funnel))
+    app.add_handler(CommandHandler("improve_eval_report", cmd_improve_eval_report))
     app.add_handler(CommandHandler("evolve_capture", cmd_evolve_capture))
     app.add_handler(CommandHandler("evolve_memory", cmd_evolve_memory))
     app.add_handler(CommandHandler("plan", cmd_plan))

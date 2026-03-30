@@ -155,6 +155,7 @@ Operational diagnosis based on telemetry:
 - `/improve_runs [proposal_id]` — list simulation/impact/promotion runs
 - `/improve_compare <proposal_id> [window_days]` — before/after metrics (anchored to artifact deployment when available)
 - `/improve_funnel [days]` — end-to-end improvement funnel metrics
+- `/improve_eval_report [days]` — consolidated experiment/evaluation report
 
 ### Promotion policy
 - `/improve_policy [manual|assisted|auto_low]`
