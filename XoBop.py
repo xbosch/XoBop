@@ -2568,7 +2568,8 @@ async def cmd_promptreject(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
 def _run_checkup_sync() -> str:
     import subprocess
     checks = []
-    venv_python = Path('.venv/bin/python').resolve()
+    import sys
+    venv_python = Path(sys.executable).resolve()
     checks.append(("venv_python", venv_python.exists()))
     req = Path('requirements.txt').resolve()
     checks.append(("requirements_txt", req.exists()))
@@ -2579,9 +2580,19 @@ def _run_checkup_sync() -> str:
     dep_note = "ok"
     if venv_python.exists() and req.exists():
         try:
-            out = subprocess.check_output([str(venv_python), "-m", "pip", "check"], text=True, stderr=subprocess.STDOUT, timeout=20)
-            dep_ok = ("No broken requirements found" in out) or (out.strip() == "")
-            dep_note = out.strip()[:180] or "ok"
+            proc = subprocess.run(
+                [str(venv_python), "-m", "pip", "check"],
+                text=True,
+                capture_output=True,
+                timeout=20,
+            )
+            out = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+            if proc.returncode == 0:
+                dep_ok = True
+                dep_note = (out or "No broken requirements found")[:180]
+            else:
+                dep_ok = False
+                dep_note = (out or f"pip check failed (exit {proc.returncode})")[:180]
         except Exception as exc:
             dep_ok = False
             dep_note = str(exc)[:180]
