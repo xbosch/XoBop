@@ -105,8 +105,9 @@ MODEL = os.getenv("MODEL", "gpt-4.1-mini")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 DB_FILE = os.getenv("DB_FILE", "memory.db")
 DEFAULT_MODE = os.getenv("DEFAULT_MODE", "strict").strip().lower()
-ARTIFACT_DIR = Path(os.getenv("ARTIFACT_DIR", "artifacts")).resolve()
-ALLOWED_WRITE_ROOT = Path(os.getenv("ALLOWED_WRITE_ROOT", os.getcwd())).resolve()
+PROJECT_ROOT = Path(os.getenv("PROJECT_ROOT", os.getcwd())).resolve()
+ARTIFACT_DIR = Path(os.getenv("ARTIFACT_DIR", str(PROJECT_ROOT / "artifacts"))).resolve()
+ALLOWED_WRITE_ROOT = Path(os.getenv("ALLOWED_WRITE_ROOT", str(PROJECT_ROOT))).resolve()
 ALLOW_RAW_SHELL = os.getenv("ALLOW_RAW_SHELL", "0").strip() == "1"
 USE_CAPABILITY_FACADE_SHELL = os.getenv("USE_CAPABILITY_FACADE_SHELL", "0").strip() == "1"
 USE_SHELL_REPLAY_CONTROLLER = os.getenv("USE_SHELL_REPLAY_CONTROLLER", "0").strip() == "1"
@@ -116,8 +117,8 @@ EMBEDDING_FALLBACK = os.getenv("EMBEDDING_FALLBACK", "1").strip() == "1"
 FILE_MEMORY_ROOT = Path(os.getenv("FILE_MEMORY_ROOT", str(ALLOWED_WRITE_ROOT))).resolve()
 LONG_MEMORY_FILE = Path(os.getenv("LONG_MEMORY_FILE", str(FILE_MEMORY_ROOT / "MEMORY.md"))).resolve()
 DAILY_MEMORY_DIR = Path(os.getenv("DAILY_MEMORY_DIR", str(FILE_MEMORY_ROOT / "memory"))).resolve()
-SELF_MODS_FILE = Path(os.getenv("SELF_MODS_FILE", str(Path(os.getcwd()) / "config" / "self_mods.json"))).resolve()
-RUNTIME_SNAPSHOT_FILE = Path(os.getenv("RUNTIME_SNAPSHOT_FILE", str(Path(os.getcwd()) / "state" / "runtime_settings_snapshot.json"))).resolve()
+SELF_MODS_FILE = Path(os.getenv("SELF_MODS_FILE", str(PROJECT_ROOT / "config" / "self_mods.json"))).resolve()
+RUNTIME_SNAPSHOT_FILE = Path(os.getenv("RUNTIME_SNAPSHOT_FILE", str(PROJECT_ROOT / "state" / "runtime_settings_snapshot.json"))).resolve()
 DAILY_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 
 HISTORY_LOAD_LIMIT = 40
@@ -3836,6 +3837,10 @@ def _improve_eval_report(days: int = 30) -> str:
             "SELECT COUNT(DISTINCT proposal_id) AS n FROM improvement_runs WHERE phase='promotion' AND status='ok' AND promotion_mode='force' AND created_ts >= datetime('now', ?)",
             (f"-{d} day",),
         ).fetchone()["n"]
+        total_proposals = conn.execute(
+            "SELECT COUNT(*) AS n FROM improvement_proposals WHERE created_ts >= datetime('now', ?)",
+            (f"-{d} day",),
+        ).fetchone()["n"]
         non_actionable = conn.execute(
             """
             SELECT COUNT(*) AS n
@@ -3894,12 +3899,55 @@ def _improve_eval_report(days: int = 30) -> str:
     retry_avg_lat = (retry_lat_delta / retry_count) if retry_count else 0.0
 
     force_dependency = (100.0 * promoted_force / promoted_total) if promoted_total else 0.0
+
+    with get_db() as conn:
+        sim_impact = conn.execute(
+            """
+            SELECT s.status AS sim_status, i.notes AS impact_notes
+            FROM (
+              SELECT proposal_id, status FROM improvement_runs
+              WHERE phase='simulation' AND created_ts >= datetime('now', ?)
+            ) s
+            JOIN (
+              SELECT proposal_id, notes FROM improvement_runs
+              WHERE phase='impact_compare' AND status='ok' AND created_ts >= datetime('now', ?)
+            ) i ON i.proposal_id = s.proposal_id
+            """,
+            (f"-{d} day", f"-{d} day"),
+        ).fetchall()
+
+    sim_tp = sim_fp = sim_fn = 0
+    for r in sim_impact:
+        note = (r["impact_notes"] or "")
+        dlt = {}
+        if note.startswith("delta="):
+            try:
+                dlt = json.loads(note[len("delta="):])
+            except Exception:
+                dlt = {}
+        improved = float(dlt.get("fail_rate", 0.0)) < 0 if isinstance(dlt, dict) else False
+        sim_ok = (r["sim_status"] == "ok")
+        if sim_ok and improved:
+            sim_tp += 1
+        elif sim_ok and (not improved):
+            sim_fp += 1
+        elif (not sim_ok) and improved:
+            sim_fn += 1
+
+    sim_precision = (100.0 * sim_tp / (sim_tp + sim_fp)) if (sim_tp + sim_fp) else 0.0
+    actionable_rate = (100.0 * (total_proposals - non_actionable) / total_proposals) if total_proposals else 0.0
+
     return (
         f"Improve eval report ({d}d)\n"
         f"{_improve_funnel_report(d)}\n"
         f"---\n"
         f"• non_actionable_proposals: {int(non_actionable)}\n"
         f"• force_dependency: {force_dependency:.1f}%\n"
+        f"Improver quality:\n"
+        f"• actionable_rate: {actionable_rate:.1f}%\n"
+        f"• sim_precision: {sim_precision:.1f}%\n"
+        f"• sim_false_positives: {sim_fp}\n"
+        f"• sim_false_negatives: {sim_fn}\n"
         f"• alias_targeted_improved: {alias_improved}\n"
         f"• alias_targeted_regressed: {alias_regressed}\n"
         f"• retry_eval_count: {retry_count}\n"
@@ -3907,6 +3955,60 @@ def _improve_eval_report(days: int = 30) -> str:
         f"• retry_avg_latency_delta_ms: {retry_avg_lat:+.1f}\n"
         f"• note: low-sample outputs should be interpreted cautiously"
     )
+
+
+def _op_sanity_report(hours: int = 24) -> str:
+    h = max(1, min(hours, 168))
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT event_type, COUNT(*) AS n FROM op_events WHERE timestamp >= datetime('now', ?) GROUP BY event_type ORDER BY n DESC",
+            (f"-{h} hour",),
+        ).fetchall()
+        per_hour = conn.execute(
+            "SELECT strftime('%Y-%m-%d %H', timestamp) AS hr, COUNT(*) AS n FROM op_events WHERE timestamp >= datetime('now', ?) GROUP BY hr ORDER BY hr",
+            (f"-{h} hour",),
+        ).fetchall()
+        dup = conn.execute(
+            """
+            SELECT event_type,command,route,COUNT(*) AS n
+            FROM op_events
+            WHERE timestamp >= datetime('now', ?)
+            GROUP BY event_type,command,route,chat_id,strftime('%Y-%m-%d %H:%M', timestamp)
+            HAVING COUNT(*) > 3
+            ORDER BY n DESC LIMIT 10
+            """,
+            (f"-{h} hour",),
+        ).fetchall()
+        requested = conn.execute("SELECT COUNT(*) AS n FROM op_events WHERE event_type='command_requested' AND timestamp >= datetime('now', ?)", (f"-{h} hour",)).fetchone()["n"]
+        routed = conn.execute("SELECT COUNT(*) AS n FROM op_events WHERE event_type='route_selected' AND timestamp >= datetime('now', ?)", (f"-{h} hour",)).fetchone()["n"]
+        tools = conn.execute("SELECT COUNT(*) AS n FROM op_events WHERE event_type='tool_run' AND timestamp >= datetime('now', ?)", (f"-{h} hour",)).fetchone()["n"]
+
+    anomalies = []
+    if requested > 0 and routed < int(0.6 * requested):
+        anomalies.append(f"low route coverage: requested={requested} routed={routed}")
+    if requested > 0 and tools > requested * 5:
+        anomalies.append(f"tool/request ratio high: tools={tools} requested={requested}")
+    if dup:
+        anomalies.append(f"duplicate bursts: {len(dup)} groups")
+    if not rows:
+        anomalies.append("no op_events in window")
+
+    lines = [f"Op sanity ({h}h)"]
+    lines.append("Events per type:")
+    for r in rows[:10]:
+        lines.append(f"- {r['event_type']}: {int(r['n'])}")
+    lines.append(f"Hourly buckets: {len(per_hour)}")
+    lines.append(f"Missing sequence hints: requested={int(requested)} routed={int(routed)} tool_run={int(tools)}")
+    if dup:
+        lines.append("Duplicate groups:")
+        for d in dup[:5]:
+            lines.append(f"- {d['event_type']} cmd={d['command'] or '-'} route={d['route'] or '-'} n={int(d['n'])}")
+    lines.append("Anomalies:")
+    if anomalies:
+        lines.extend([f"- {a}" for a in anomalies])
+    else:
+        lines.append("- none")
+    return "\n".join(lines)
 
 
 def _top_skills(limit: int = 10) -> str:
@@ -4347,6 +4449,17 @@ async def cmd_state_repair(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
     rep = _repair_state_from_snapshot()
     _record_op_event("state_repair", chat_id=update.effective_chat.id, status=("ok" if rep.startswith("✅") else "error"))
     await _reply(update, rep)
+
+
+async def cmd_op_sanity(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _owner_only(update):
+        return
+    raw = update.message.text.partition(" ")[2].strip()
+    try:
+        hours = int(raw) if raw else 24
+    except Exception:
+        hours = 24
+    await _reply(update, _op_sanity_report(hours))
 
 
 async def cmd_diagnose(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4969,6 +5082,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 /checkup — dependency/env drift check
 /state_check — compare canonical runtime snapshot vs DB/settings
 /state_repair — repair DB/settings from runtime snapshot
+/op_sanity [hours] — instrumentation sanity check and anomaly scan
 /diagnose [days] — ops diagnosis from instrumentation signals
 /improve_propose [days] — generate a data-backed improvement proposal
 /improve_list — list recent improvement proposals
@@ -5079,6 +5193,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             cmd_checkup=lambda u: cmd_checkup(u, ctx),
             cmd_state_check=lambda u: cmd_state_check(u, ctx),
             cmd_state_repair=lambda u: cmd_state_repair(u, ctx),
+            cmd_op_sanity=lambda u: cmd_op_sanity(u, ctx),
             cmd_diagnose=lambda u: cmd_diagnose(u, ctx),
             cmd_improve_propose=lambda u: cmd_improve_propose(u, ctx),
             cmd_improve_list=lambda u: cmd_improve_list(u, ctx),
@@ -5250,6 +5365,7 @@ def main() -> None:
     app.add_handler(CommandHandler("checkup", cmd_checkup))
     app.add_handler(CommandHandler("state_check", cmd_state_check))
     app.add_handler(CommandHandler("state_repair", cmd_state_repair))
+    app.add_handler(CommandHandler("op_sanity", cmd_op_sanity))
     app.add_handler(CommandHandler("diagnose", cmd_diagnose))
     app.add_handler(CommandHandler("improve_propose", cmd_improve_propose))
     app.add_handler(CommandHandler("improve_list", cmd_improve_list))

@@ -89,6 +89,7 @@ flowchart TD
 - `/checkup`
 - `/state_check`
 - `/state_repair`
+- `/op_sanity [hours]`
 - `/mode [strict|normal|overseer]`
 - `/exec <command>`
 - `/clearctx`
