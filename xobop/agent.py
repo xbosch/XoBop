@@ -37,6 +37,8 @@ async def run_agent_loop(
     history_load_limit: int,
     max_memory_results: int,
     max_tool_rounds: int,
+    history_max: int,
+    history_trim_to: int,
     get_history: Callable[[int], list[dict[str, str]]],
     build_memory_block: Callable[[str, int], Awaitable[str]],
     build_tools_from_db: Callable[[str], list[dict[str, Any]]],
@@ -155,7 +157,8 @@ async def run_agent_loop(
         loop = asyncio.get_running_loop()
         fire_and_forget(loop, lambda: save_message(chat_id, "assistant", final_text), label="save_assistant_msg")
         hist.append({"role": "assistant", "content": final_text})
-        if len(hist) > 120:
-            # keep behavior compatible with existing trim defaults in caller
-            pass
+        if len(hist) > max(1, int(history_max)):
+            trimmed = hist[-max(1, int(history_trim_to)):]
+            hist.clear()
+            hist.extend(trimmed)
     return final_text

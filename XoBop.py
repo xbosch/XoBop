@@ -22,6 +22,7 @@ This version remains single user by design.
 
 import asyncio
 import base64
+import contextvars
 import hashlib
 import json
 import logging
@@ -448,20 +449,18 @@ def _repair_state_from_snapshot() -> str:
     return "✅ Runtime settings repaired from snapshot."
 
 
-def _load_self_mods() -> dict[str, Any]:
+def _export_self_mods_debug() -> None:
+    """Best-effort debug export only; DB settings remain source of truth."""
     try:
-        if SELF_MODS_FILE.exists():
-            data = json.loads(SELF_MODS_FILE.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                return data
+        payload = {
+            "command_aliases": _get_command_aliases(),
+            "exec_retry_limit": _get_exec_retry_limit(),
+            "last_applied_artifact_id": _get_last_applied_artifact_id(),
+        }
+        SELF_MODS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        SELF_MODS_FILE.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     except Exception:
         pass
-    return {"command_aliases": {}, "exec_retry_limit": 0}
-
-
-def _save_self_mods(data: dict[str, Any]) -> None:
-    SELF_MODS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    SELF_MODS_FILE.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def _get_command_aliases() -> dict[str, str]:
@@ -472,20 +471,13 @@ def _get_command_aliases() -> dict[str, str]:
             return {str(k).strip().lower(): str(v).strip().lower() for k, v in d.items() if str(k).strip() and str(v).strip()}
     except Exception:
         pass
-    # fallback from tracked self_mods file
-    mods = _load_self_mods()
-    aliases = mods.get("command_aliases", {}) if isinstance(mods, dict) else {}
-    if isinstance(aliases, dict):
-        return {str(k).strip().lower(): str(v).strip().lower() for k, v in aliases.items() if str(k).strip() and str(v).strip()}
     return {}
 
 
 def _set_command_aliases(d: dict[str, str]) -> None:
     clean = {str(k).strip().lower(): str(v).strip().lower() for k, v in d.items() if str(k).strip() and str(v).strip()}
     _set_setting("command_aliases_json", json.dumps(clean, sort_keys=True))
-    mods = _load_self_mods()
-    mods["command_aliases"] = clean
-    _save_self_mods(mods)
+    _export_self_mods_debug()
 
 
 def _overseer_enabled() -> bool:
@@ -595,9 +587,7 @@ def _get_exec_retry_limit() -> int:
 def _set_exec_retry_limit(v: int) -> None:
     n = max(0, min(3, int(v)))
     _set_setting("exec_retry_limit", str(n))
-    mods = _load_self_mods()
-    mods["exec_retry_limit"] = n
-    _save_self_mods(mods)
+    _export_self_mods_debug()
 
 
 def _panic_locked() -> bool:
@@ -1158,6 +1148,7 @@ async def _run_shell_async(command: str, cwd: str, timeout: int, raw: bool) -> t
 # =============================================================================
 
 history_by_chat: dict[int, list[dict[str, str]]] = {}
+_AGENT_TURN_ID: contextvars.ContextVar[str] = contextvars.ContextVar("agent_turn_id", default="")
 
 
 def _load_recent_history(chat_id: int, limit: int = HISTORY_LOAD_LIMIT) -> list[dict[str, str]]:
@@ -2024,11 +2015,12 @@ def _record_run(
         conn.execute(
             """
             INSERT INTO runs
-              (chat_id,user_query,mode,tool_name,tool_args,result,exit_code,duration_ms,status,artifact_path)
-            VALUES (?,?,?,?,?,?,?,?,?,?)
+              (chat_id,turn_id,user_query,mode,tool_name,tool_args,result,exit_code,duration_ms,status,artifact_path)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 chat_id,
+                _AGENT_TURN_ID.get("") or "",
                 _redact(user_query),
                 mode,
                 tool_name,
@@ -2432,37 +2424,38 @@ async def _run_agent(chat_id: int, query: str, force: bool = False) -> str:
         global _last_openai_latency_ms
         _last_openai_latency_ms = ms
 
-    final_text = await run_agent_loop(
-        chat_id=chat_id,
-        query=query,
-        force=force,
-        mode=mode,
-        client=client,
-        model=MODEL,
-        history_load_limit=HISTORY_LOAD_LIMIT,
-        max_memory_results=MAX_MEMORY_RESULTS,
-        max_tool_rounds=MAX_TOOL_ROUNDS,
-        get_history=_get_history,
-        build_memory_block=_build_memory_block,
-        build_tools_from_db=_build_tools_from_db,
-        user_forced=_user_forced,
-        get_runtime_prompt=_get_runtime_prompt,
-        save_message=_save_message,
-        maybe_promote_memory=_maybe_promote_memory,
-        call_skill=_call_skill,
-        redact=_redact,
-        normalize_machine_kv_output=normalize_machine_kv_output,
-        fire_and_forget=_fire_and_forget,
-        log=log,
-        set_last_openai_latency_ms=_set_last_latency,
-        temperature_for_mode=_temperature_for_mode,
-    )
-
-    if chat_id != 0:
-        hist = _get_history(chat_id)
-        if len(hist) > MAX_HISTORY:
-            history_by_chat[chat_id] = hist[-TRIM_TO:]
-    return final_text
+    token = _AGENT_TURN_ID.set(f"{chat_id}-{uuid.uuid4().hex[:12]}")
+    try:
+        final_text = await run_agent_loop(
+            chat_id=chat_id,
+            query=query,
+            force=force,
+            mode=mode,
+            client=client,
+            model=MODEL,
+            history_load_limit=HISTORY_LOAD_LIMIT,
+            max_memory_results=MAX_MEMORY_RESULTS,
+            max_tool_rounds=MAX_TOOL_ROUNDS,
+            history_max=MAX_HISTORY,
+            history_trim_to=TRIM_TO,
+            get_history=_get_history,
+            build_memory_block=_build_memory_block,
+            build_tools_from_db=_build_tools_from_db,
+            user_forced=_user_forced,
+            get_runtime_prompt=_get_runtime_prompt,
+            save_message=_save_message,
+            maybe_promote_memory=_maybe_promote_memory,
+            call_skill=_call_skill,
+            redact=_redact,
+            normalize_machine_kv_output=normalize_machine_kv_output,
+            fire_and_forget=_fire_and_forget,
+            log=log,
+            set_last_openai_latency_ms=_set_last_latency,
+            temperature_for_mode=_temperature_for_mode,
+        )
+        return final_text
+    finally:
+        _AGENT_TURN_ID.reset(token)
 
 
 # =============================================================================
@@ -5191,16 +5184,14 @@ async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def _apply_self_mods_to_runtime() -> None:
-    # Legacy fallback path (pre-snapshot)
-    mods = _load_self_mods()
-    aliases = mods.get("command_aliases", {}) if isinstance(mods, dict) else {}
-    if isinstance(aliases, dict):
-        _set_setting("command_aliases_json", json.dumps({str(k).strip().lower(): str(v).strip().lower() for k, v in aliases.items() if str(k).strip() and str(v).strip()}, sort_keys=True))
-    retry = mods.get("exec_retry_limit", 0) if isinstance(mods, dict) else 0
-    try:
-        _set_setting("exec_retry_limit", str(max(0, min(3, int(retry)))))
-    except Exception:
+    # DB is source of truth; ensure sane defaults if missing.
+    if _get_setting("command_aliases_json") is None:
+        _set_setting("command_aliases_json", "{}")
+    if _get_setting("exec_retry_limit") is None:
         _set_setting("exec_retry_limit", "0")
+    if _get_setting("last_applied_artifact_id") is None:
+        _set_setting("last_applied_artifact_id", "0")
+    _export_self_mods_debug()
 
 
 def _startup_reconcile_runtime_state() -> None:

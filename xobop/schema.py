@@ -40,6 +40,7 @@ SCHEMA_SQL = r"""
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
                 chat_id INTEGER NOT NULL,
+                turn_id TEXT DEFAULT '',
                 user_query TEXT NOT NULL,
                 mode TEXT NOT NULL,
                 tool_name TEXT,
@@ -51,6 +52,7 @@ SCHEMA_SQL = r"""
                 artifact_path TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_runs_chat_id_id ON runs(chat_id, id);
+            CREATE INDEX IF NOT EXISTS idx_runs_turn_id ON runs(turn_id, id);
             CREATE INDEX IF NOT EXISTS idx_runs_status_ts ON runs(status, timestamp);
 
             CREATE TABLE IF NOT EXISTS op_events (
