@@ -83,6 +83,7 @@ from xobop.runtime_state import (
     build_state_check_dict as rs_build_state_check_dict,
     repair_from_snapshot as rs_repair_from_snapshot,
 )
+from xobop.mode_utils import mode_help_text as mu_mode_help_text, temperature_for_mode as mu_temperature_for_mode
 from xobop.io_text import fetch_text_limited as io_fetch_text_limited, read_text_limited as io_read_text_limited
 from xobop.shell_policy import classify_shell as sp_classify_shell, user_forced as sp_user_forced
 from xobop.improve import (
@@ -2078,7 +2079,7 @@ async def _call_skill(chat_id: int, user_query: str, mode: str, skill_name: str,
 # =============================================================================
 
 def _temperature_for_mode(mode: str) -> float:
-    return 0.05 if mode == "strict" else 0.15
+    return mu_temperature_for_mode(mode)
 
 
 async def _analyze_attachment(chat_id: int, path: str, user_hint: str = "") -> str:
@@ -3753,7 +3754,7 @@ async def cmd_mode(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await loop.run_in_executor(None, lambda: _set_setting("mode", requested))
         await _reply(update, f"Mode set to *{requested}*.")
     else:
-        await _reply(update, f"Current mode: *{_get_mode()}*. Use `/mode strict`, `/mode normal`, or `/mode overseer`.")
+        await _reply(update, mu_mode_help_text(_get_mode()))
 
 
 async def cmd_promptshow(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
