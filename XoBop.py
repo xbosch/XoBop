@@ -77,6 +77,7 @@ from xobop.runtime_ops import (
     to_thread as ops_to_thread,
 )
 from xobop.attachments import extract_docx_text, extract_xlsx_text, summarize_zip
+from xobop.commands_core import build_attachdiag_text, build_state_check_text, build_status_text
 from xobop.improve import (
     apply_artifact_to_runtime_settings as improve_apply_artifact_to_runtime_settings,
     artifact_contract as improve_artifact_contract,
@@ -4114,26 +4115,14 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _owner_only(update):
         return
     chat_id = update.effective_chat.id
-    with get_db() as conn:
-        total = conn.execute("SELECT COUNT(*) AS n FROM conversations WHERE chat_id=?", (chat_id,)).fetchone()["n"]
-        recent = conn.execute("SELECT timestamp FROM conversations WHERE chat_id=? ORDER BY id DESC LIMIT 1", (chat_id,)).fetchone()
-        open_tasks = conn.execute("SELECT COUNT(*) AS n FROM tasks WHERE status='open'").fetchone()["n"]
-        enabled_skills = conn.execute("SELECT COUNT(*) AS n FROM skills WHERE enabled=1").fetchone()["n"]
-        cron_count = conn.execute("SELECT COUNT(*) AS n FROM cron_jobs WHERE enabled=1").fetchone()["n"]
-        memory_count = conn.execute("SELECT COUNT(*) AS n FROM memory_items WHERE is_deleted=0").fetchone()["n"]
-    last = recent["timestamp"] if recent else "never"
     await _reply(
         update,
-        (
-            f"• Messages: {total}\n"
-            f"• Last activity: {last}\n"
-            f"• Model: {MODEL}\n"
-            f"• Embedding model: {EMBEDDING_MODEL}\n"
-            f"• Open tasks: {open_tasks}\n"
-            f"• Memories: {memory_count}\n"
-            f"• Enabled skills: {enabled_skills}\n"
-            f"• Active cron jobs: {cron_count}\n"
-            f"• Mode: {_get_mode()}"
+        build_status_text(
+            chat_id=chat_id,
+            model=MODEL,
+            embedding_model=EMBEDDING_MODEL,
+            get_mode=_get_mode,
+            get_db=get_db,
         ),
     )
 
@@ -4144,21 +4133,7 @@ async def cmd_attachdiag(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     chat_id = update.effective_chat.id
     path = STATE.last_attachment_by_chat.get(chat_id)
     diag = STATE.last_attachment_diag_by_chat.get(chat_id, {})
-    if not path:
-        await _reply(update, "No recent attachment in this chat.")
-        return
-    await _reply(
-        update,
-        (
-            f"Attachment diag\n"
-            f"• path: {path}\n"
-            f"• extractor: {diag.get('extractor', 'n/a')}\n"
-            f"• status: {diag.get('status', 'n/a')}\n"
-            f"• mime: {diag.get('mime', 'n/a')}\n"
-            f"• size: {diag.get('size', 'n/a')}\n"
-            f"• preview_chars: {diag.get('preview_chars', 'n/a')}"
-        ),
-    )
+    await _reply(update, build_attachdiag_text(path=path, diag=diag))
 
 
 async def cmd_health(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4170,12 +4145,7 @@ async def cmd_state_check(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
     if not _owner_only(update):
         return
     d = _state_check_dict()
-    if d["match"]:
-        snap = d.get("snapshot", {})
-        await _reply(update, f"State check: ✅ match\nlast_applied_artifact_id: {int(snap.get('last_applied_artifact_id', 0))}")
-        return
-    mism = d.get("mismatched", {})
-    await _reply(update, f"State check: ❌ drift detected\nkeys: {', '.join(mism.keys()) if mism else 'unknown'}\nUse `/state_repair`.")
+    await _reply(update, build_state_check_text(state_check=d))
 
 
 async def cmd_state_repair(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
