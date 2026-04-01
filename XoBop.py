@@ -228,6 +228,11 @@ def _init_db() -> None:
         repo_cwd=os.getcwd(),
     )
 
+    # Keep run_shell policy in sync with current runtime roots (prevents stale clone drift).
+    _set_skill_policy("run_shell", "write_root", str(ALLOWED_WRITE_ROOT))
+    _set_skill_policy("run_shell", "default_cwd", str(PROJECT_ROOT))
+    _set_skill_policy("run_shell", "allow_raw_shell", "1" if ALLOW_RAW_SHELL else "0")
+
 
 # =============================================================================
 # Settings, policies, and defaults
@@ -917,8 +922,19 @@ def _blocked_suffix(path: Path) -> Optional[str]:
     blocked_raw = _get_policy("blocked_write_suffixes", DEFAULT_GLOBAL_POLICIES["blocked_write_suffixes"])
     blocked = [s.strip().lower() for s in blocked_raw.split(",") if s.strip()]
     lower_name = path.name.lower()
+
+    # Allow code-generation in sandbox area while keeping core repo protection.
+    # This avoids false negatives for tests that intentionally write .py/.sh files.
+    try:
+        sandbox_root = (ALLOWED_WRITE_ROOT / "agent-test").resolve()
+        in_sandbox = _is_under_root(path.resolve(), sandbox_root)
+    except Exception:
+        in_sandbox = False
+
     for suffix in blocked:
         if lower_name.endswith(suffix):
+            if in_sandbox and suffix in {".py", ".sh"}:
+                continue
             return suffix
     return None
 
