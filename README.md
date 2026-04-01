@@ -250,7 +250,7 @@ source .venv/bin/activate
 pip install -U pip
 pip install -r requirements.txt
 cp .env.example .env
-./run_test.sh
+./run_xobop_test.sh
 ```
 
 ---
@@ -293,7 +293,7 @@ xobops-test/
 ├── memory/
 ├── .env
 ├── .env.example
-├── run_test.sh
+├── run_xobop_test.sh
 └── memory.db
 ```
 
