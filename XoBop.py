@@ -78,6 +78,11 @@ from xobop.text_math import cosine as tm_cosine, deterministic_hash as tm_hash, 
 from xobop.policy_helpers import blocked_suffix as ph_blocked_suffix, domain_allowed as ph_domain_allowed, is_under_root as ph_is_under_root
 from xobop.artifacts_io import shorten_or_artifact as aio_shorten_or_artifact, store_artifact as aio_store_artifact
 from xobop.memory_math import fallback_embedding as mm_fallback_embedding
+from xobop.runtime_state import (
+    build_runtime_state_payload as rs_build_payload,
+    build_state_check_dict as rs_build_state_check_dict,
+    repair_from_snapshot as rs_repair_from_snapshot,
+)
 from xobop.io_text import fetch_text_limited as io_fetch_text_limited, read_text_limited as io_read_text_limited
 from xobop.shell_policy import classify_shell as sp_classify_shell, user_forced as sp_user_forced
 from xobop.improve import (
@@ -398,14 +403,13 @@ def _set_last_applied_artifact_id(artifact_id: int) -> None:
 
 
 def _runtime_state_payload(*, last_applied_artifact_id: Optional[int] = None, last_promotion_mode: str = "") -> dict[str, Any]:
-    payload = {
-        "command_aliases": _get_command_aliases(),
-        "exec_retry_limit": _get_exec_retry_limit(),
-        "last_applied_artifact_id": int(_get_last_applied_artifact_id() if last_applied_artifact_id is None else last_applied_artifact_id),
-        "last_promotion_mode": (last_promotion_mode or ""),
-    }
-    payload["command_aliases"] = {str(k): str(v) for k, v in sorted(payload["command_aliases"].items())}
-    return payload
+    return rs_build_payload(
+        get_command_aliases=_get_command_aliases,
+        get_exec_retry_limit=_get_exec_retry_limit,
+        get_last_applied_artifact_id=_get_last_applied_artifact_id,
+        last_applied_artifact_id=last_applied_artifact_id,
+        last_promotion_mode=last_promotion_mode,
+    )
 
 
 def _export_runtime_snapshot(*, last_applied_artifact_id: Optional[int] = None, last_promotion_mode: str = "") -> None:
@@ -428,36 +432,17 @@ def _load_runtime_snapshot() -> dict[str, Any]:
 def _state_check_dict() -> dict[str, Any]:
     snap = _load_runtime_snapshot()
     db = _runtime_state_payload()
-    mismatched: dict[str, dict[str, Any]] = {}
-    for key in ["command_aliases", "exec_retry_limit", "last_applied_artifact_id"]:
-        if snap.get(key) != db.get(key):
-            mismatched[key] = {"snapshot": snap.get(key), "db": db.get(key)}
-    return {
-        "snapshot_exists": bool(snap),
-        "match": len(mismatched) == 0 and bool(snap),
-        "mismatched": mismatched,
-        "snapshot": snap,
-        "db": db,
-    }
+    return rs_build_state_check_dict(snapshot=snap, db_payload=db)
 
 
 def _repair_state_from_snapshot() -> str:
     snap = _load_runtime_snapshot()
-    if not snap:
-        return "⛔ No runtime snapshot found."
-    aliases = snap.get("command_aliases", {})
-    if isinstance(aliases, dict):
-        _set_command_aliases({str(k): str(v) for k, v in aliases.items()})
-    retry = snap.get("exec_retry_limit", 0)
-    try:
-        _set_exec_retry_limit(int(retry))
-    except Exception:
-        _set_exec_retry_limit(0)
-    try:
-        _set_last_applied_artifact_id(int(snap.get("last_applied_artifact_id", 0) or 0))
-    except Exception:
-        _set_last_applied_artifact_id(0)
-    return "✅ Runtime settings repaired from snapshot."
+    return rs_repair_from_snapshot(
+        snapshot=snap,
+        set_command_aliases=_set_command_aliases,
+        set_exec_retry_limit=_set_exec_retry_limit,
+        set_last_applied_artifact_id=_set_last_applied_artifact_id,
+    )
 
 
 def _export_self_mods_debug() -> None:
