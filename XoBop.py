@@ -2061,6 +2061,13 @@ async def _call_skill(chat_id: int, user_query: str, mode: str, skill_name: str,
         skill = _get_skill(skill_name)
         policies = _load_skill_policies(skill.name)
 
+        # Hard bind critical runtime shell boundaries to current process config.
+        # This prevents stale DB policy rows from pointing to old clones/paths.
+        if skill.name == "run_shell":
+            policies["write_root"] = str(ALLOWED_WRITE_ROOT)
+            policies["default_cwd"] = str(PROJECT_ROOT)
+            policies["allow_raw_shell"] = "1" if ALLOW_RAW_SHELL else "0"
+
         if skill.handler_type == "shell_command":
             shell_limit = int(_get_policy("shell_calls_per_minute", DEFAULT_GLOBAL_POLICIES["shell_calls_per_minute"]))
             ok, msg = _enforce_rate_limit("shell_calls", shell_limit)
