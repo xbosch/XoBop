@@ -135,6 +135,7 @@ from xobop.commands_safety import (
     cmd_panicstatus_impl,
     cmd_panicunlock_impl,
 )
+from xobop.commands_skills import cmd_skilloff_impl, cmd_skillon_impl, cmd_skills_impl
 from xobop.io_text import fetch_text_limited as io_fetch_text_limited, read_text_limited as io_read_text_limited
 from xobop.shell_policy import classify_shell as sp_classify_shell, user_forced as sp_user_forced
 from xobop.improve import (
@@ -4289,50 +4290,15 @@ async def cmd_exec(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_skills(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
-    with get_db() as conn:
-        rows = conn.execute("SELECT name,enabled,risk_level,handler_type FROM skills ORDER BY id").fetchall()
-    if not rows:
-        await _reply(update, "No skills.")
-        return
-    lines = [
-        f"{'✅' if r['enabled'] else '⏸'} *{r['name']}* [{r['risk_level']}] ({r['handler_type']})"
-        for r in rows
-    ]
-    await _reply(update, "\n".join(lines))
+    await cmd_skills_impl(update=update, owner_only=_owner_only, reply=_reply, get_db=get_db)
 
 
 async def cmd_skillon(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
-    name = update.message.text.partition(" ")[2].strip()
-    if not name:
-        await _reply(update, "Use: `/skillon <name>`")
-        return
-    with get_db() as conn:
-        cur = conn.execute("UPDATE skills SET enabled=1,updated_ts=CURRENT_TIMESTAMP WHERE name=?", (name,))
-    if cur.rowcount:
-        _audit_skill(name, "enabled")
-        await _reply(update, f"✓ Skill '{name}' enabled.")
-    else:
-        await _reply(update, f"Skill not found: {name}")
+    await cmd_skillon_impl(update=update, owner_only=_owner_only, reply=_reply, get_db=get_db, audit_skill=_audit_skill)
 
 
 async def cmd_skilloff(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
-    name = update.message.text.partition(" ")[2].strip()
-    if not name:
-        await _reply(update, "Use: `/skilloff <name>`")
-        return
-    with get_db() as conn:
-        cur = conn.execute("UPDATE skills SET enabled=0,updated_ts=CURRENT_TIMESTAMP WHERE name=?", (name,))
-    if cur.rowcount:
-        _audit_skill(name, "disabled")
-        await _reply(update, f"✓ Skill '{name}' disabled.")
-    else:
-        await _reply(update, f"Skill not found: {name}")
+    await cmd_skilloff_impl(update=update, owner_only=_owner_only, reply=_reply, get_db=get_db, audit_skill=_audit_skill)
 
 
 async def cmd_cronadd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
