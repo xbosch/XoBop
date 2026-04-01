@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import XoBop as xb
+import xobop_core_base as xbb
 from xobop.capabilities_shell import exec_shell_command
 from xobop.handlers_runtime import resolve_command_alias
 from xobop.router import classify
@@ -112,17 +113,27 @@ def test_snapshot_lineage_last_applied_artifact_id() -> None:
     original_set = xb._set_setting
     original_alias_getter = xb._get_command_aliases
     original_retry_getter = xb._get_exec_retry_limit
+    original_get_base = xbb._get_setting
+    original_set_base = xbb._set_setting
+    original_alias_getter_base = xbb._get_command_aliases
+    original_retry_getter_base = xbb._get_exec_retry_limit
     original_snapshot_file = xb.RUNTIME_SNAPSHOT_FILE
+    original_snapshot_file_base = xbb.RUNTIME_SNAPSHOT_FILE
 
     try:
         xb._get_setting = lambda key, default=None: store.get(key, default)
         xb._set_setting = lambda key, value: store.__setitem__(key, value)
         xb._get_command_aliases = lambda: {"statu": "status"}
         xb._get_exec_retry_limit = lambda: 1
+        xbb._get_setting = xb._get_setting
+        xbb._set_setting = xb._set_setting
+        xbb._get_command_aliases = xb._get_command_aliases
+        xbb._get_exec_retry_limit = xb._get_exec_retry_limit
 
         with tempfile.TemporaryDirectory() as td:
             snap_path = Path(td) / "runtime_settings_snapshot.json"
             xb.RUNTIME_SNAPSHOT_FILE = snap_path
+            xbb.RUNTIME_SNAPSHOT_FILE = snap_path
 
             store["last_applied_artifact_id"] = "42"
             xb._export_runtime_snapshot(last_promotion_mode="policy")
@@ -138,7 +149,12 @@ def test_snapshot_lineage_last_applied_artifact_id() -> None:
         xb._set_setting = original_set
         xb._get_command_aliases = original_alias_getter
         xb._get_exec_retry_limit = original_retry_getter
+        xbb._get_setting = original_get_base
+        xbb._set_setting = original_set_base
+        xbb._get_command_aliases = original_alias_getter_base
+        xbb._get_exec_retry_limit = original_retry_getter_base
         xb.RUNTIME_SNAPSHOT_FILE = original_snapshot_file
+        xbb.RUNTIME_SNAPSHOT_FILE = original_snapshot_file_base
 
 
 def build_policies() -> dict:

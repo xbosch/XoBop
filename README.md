@@ -1,74 +1,95 @@
-# XoBop
+# XoBop V5 (xobop-dev)
 
-Owner-only Telegram operations copilot with safety gates, bounded self-improvement, and reproducible runtime behavior.
+Owner-only Telegram operations copilot with strict safety controls, durable state, and a governed self-improvement loop.
 
-## What it is
+## TL;DR
 
-XoBop is designed for:
-- deterministic operations
-- strict safety around shell and writes
-- measurable improvement loops
-- reproducible state and migration-safe DB evolution
+- **Interface:** Telegram bot, owner-scoped command surface
+- **Runtime state:** SQLite (`memory.db`) + deterministic snapshot/state-repair paths
+- **Execution:** skill-based (read/write/http/shell/agent), with policy gates
+- **Safety:** panic-lock, shell/write boundaries, rate limits, force-gated risk
+- **Improvement:** proposal → artifact → simulation → promotion → impact comparison
 
-## Current Architecture (modularized)
+---
 
-Core entrypoint remains `XoBop.py` (wiring), with extracted modules in `xobop/`:
+## Architecture (current)
 
-- `config.py` — env/settings loader
-- `schema.py` — core DB schema creation
-- `migrations.py` — versioned schema migrations (`schema_migrations` table)
-- `db_init.py` — DB init orchestration
-- `cron_bootstrap.py` — default cron job seeding
-- `bootstrap.py` — Telegram app build + handler registration
-- `handlers_runtime.py` — runtime message/command handling
-- `router.py` — intent classification
-- `output_guardrails.py` — machine-output normalization + anti-fabrication guardrails
-- `agent.py` — core LLM tool-loop orchestration
-- `capabilities_shell.py` / `shell_facade.py` — shell policy + live/sim execution facade
-- `simulation/` — replay controller, manifests, temp DB sandbox
+After refactor, the legacy monolith entrypoint is now thin:
+
+- `XoBop.py` — compatibility launcher (thin)
+- `xobop_core.py` — thin aggregator
+- `xobop_core_base.py` — core runtime segment A
+- `xobop_core_tail.py` — core runtime segment B
+
+And domain modules under `xobop/` continue to absorb logic:
+
+- **Bootstrap/runtime wiring**
+  - `bootstrap.py`, `db_init.py`, `schema.py`, `migrations.py`, `cron_bootstrap.py`
+- **Routing/handlers**
+  - `handlers_runtime.py`, `router.py`, `app_handlers.py`, `app_lifecycle.py`
+- **Command domains**
+  - `commands_admin.py`, `commands_improve.py`, `commands_memory.py`, `commands_safety.py`, `commands_skills.py`, `commands_cron.py`, `commands_prompt.py`
+- **Execution + policy**
+  - `skills_runtime.py`, `capabilities_shell.py`, `shell_facade.py`, `shell_policy.py`, `policy_helpers.py`, `runtime_ops.py`
+- **Improve pipeline**
+  - `improve.py`, `improve_generate.py`, `improve_pipeline_ops.py`, `runtime_state.py`, `runtime_snapshot.py`
+- **Attachment/document processing**
+  - `attachments.py`, `attachments_runtime.py`, `artifacts_io.py`, `io_text.py`
+- **Math/text helpers**
+  - `text_math.py`, `memory_math.py`, `mode_utils.py`, `commands_core.py`, `commands_ops.py`, `ops_logging.py`, `selfmods.py`
+
+For deeper docs, see:
+- `docs/ARCHITECTURE.md`
+- `docs/IMPROVEMENT_PIPELINE.md`
+- `docs/OPERATIONS.md`
+- `docs/TESTING.md`
+
+---
 
 ## Safety model
 
-- Owner-only command surface (`OWNER_ID`)
-- Panic-lock mode for execution freeze
-- Shell hard blocks for destructive patterns
-- Write/read root boundaries
-- Force-gated risky actions
-- PASS-downgrade guardrails when proof/checksum evidence is missing
+- Owner-only command execution (`OWNER_ID`)
+- Panic-lock for execution freeze (`/paniclock`, `/panicunlock`, `/panicstatus`)
+- Shell hard-block and typed policy checks
+- Read/write root enforcement
+- Rate limits (tool and shell buckets)
+- Force-required paths for high-risk changes (including prompt artifacts)
+- Snapshot/state drift detection and repair (`/state_check`, `/state_repair`)
 
-## Commands
+---
 
-### Core
-- `/help`
-- `/status`
-- `/health`
-- `/checkup`
-- `/state_check`
-- `/state_repair`
+## Key command families
+
+### Core ops
+- `/help`, `/status`, `/health`, `/checkup`
+- `/state_check`, `/state_repair`
 - `/mode [strict|normal|overseer]`
 - `/exec <command>`
 
-### Improvement lifecycle
+### Memory/tasks
+- `/remember key: value`, `/delfact key`, `/facts`
+- `/memories [limit]`, `/memadd text`, `/memdel id`
+- `/addtask [priority:] desc`, `/donetask id`, `/tasks`
+
+### Improve lifecycle
 - `/diagnose [days]`
-- `/improve_propose [days]`
-- `/improve_list`
-- `/improve_compile <proposal_id>`
-- `/improve_artifacts [proposal_id]`
-- `/improve_simulate <proposal_id>`
-- `/improve_runs [proposal_id]`
+- `/improve_propose [days]`, `/improve_list`
+- `/improve_compile <proposal_id>`, `/improve_artifacts [proposal_id]`
+- `/improve_simulate <proposal_id>`, `/improve_runs [proposal_id]`
 - `/improve_compare <proposal_id> [window_days]`
-- `/improve_policy [manual|assisted|auto_low]`
-- `/improve_promote <proposal_id> [force <reason>]`
-- `/improve_autopromote`
+- `/improve_policy ...`, `/improve_promote ...`, `/improve_autopromote`
 
 ### Cron
 - `/cronadd name | schedule | skill_type | description | args_json`
-- `/cronrm <name>`
-- `/cronlist`
-- `/cronon <name>`
-- `/cronoff <name>`
-- `/cronrun <name>`
-- `/cronruns <name> [limit]`
+- `/cronrm <name>`, `/cronlist`, `/cronon <name>`, `/cronoff <name>`
+- `/cronrun <name>`, `/cronruns <name> [limit]`
+
+### Prompt/quiet-hours
+- `/promptshow`, `/promptset <mode> <text>`
+- `/promptproposal`, `/promptapprove`, `/promptreject`
+- `/quiethours HH:MM-HH:MM`, `/quietoff`, `/quietflush`
+
+---
 
 ## Environment
 
@@ -80,11 +101,13 @@ Required:
 Important defaults:
 - `DB_FILE=memory.db`
 - `DEFAULT_MODE=strict`
-- `MODEL=gpt-4.1-mini`
+- `MODEL=gpt-4.1-mini` (or configured runtime model)
 - `EMBEDDING_MODEL=text-embedding-3-small`
 - `ALLOW_RAW_SHELL=0`
-- `ALLOWED_WRITE_ROOT=<repo_root>`
-- `READ_ROOT=<repo_root or broader read root>`
+
+See `.env.example` for complete variable list.
+
+---
 
 ## Setup
 
@@ -95,32 +118,34 @@ source .venv/bin/activate
 pip install -U pip
 pip install -r requirements.txt
 cp .env.example .env
-./run_xobop_test.sh
 ```
 
-## Tests
+Run bot:
 
-Smoke/unit coverage (pytest):
-- `tests/test_output_guardrails.py`
-- `tests/test_migrations.py`
-- `tests/test_db_init.py`
-- `tests/test_command_registry.py`
-
-Run:
 ```bash
+source .venv/bin/activate
+python XoBop.py
+```
+
+---
+
+## Validation
+
+```bash
+source .venv/bin/activate
+python -m py_compile XoBop.py xobop_core.py xobop_core_base.py xobop_core_tail.py xobop/*.py
 pytest -q
+python scripts/eval_suite.py
 ```
 
-## Validation helpers
+---
 
-```bash
-python3 -m py_compile XoBop.py xobop/*.py xobop/simulation/*.py scripts/eval_suite.py
-.venv/bin/python scripts/eval_suite.py
-.venv/bin/python scripts/build_signals.py
-```
+## Refactor policy (important)
 
-## Notes
-
-- During evaluation windows, keep scope controlled and changes reversible.
-- Prefer evidence-backed behavior over optimistic outputs.
-- Keep safety boundaries strict; tune throughput policies gradually.
+- Keep behavior stable while moving code.
+- Prefer domain extraction over adding wrappers in-place.
+- No single runtime file should exceed **2000 lines**.
+- Every refactor commit should pass:
+  - `py_compile`
+  - `pytest`
+  - `eval_suite` (when touched areas overlap improve/runtime policy)
