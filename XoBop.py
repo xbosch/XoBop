@@ -146,6 +146,10 @@ from xobop.commands_cron import (
     cmd_cronruns_impl,
 )
 from xobop.commands_prompt import (
+    cmd_help_impl,
+    cmd_promptapprove_impl,
+    cmd_promptproposal_impl,
+    cmd_promptreject_impl,
     cmd_promptset_impl,
     cmd_promptshow_impl,
     cmd_quietflush_impl,
@@ -1587,6 +1591,15 @@ _artifact_task: Optional[asyncio.Task] = None
 _notify_task: Optional[asyncio.Task] = None
 _seen_artifacts: set[str] = set()
 _prompt_proposal: Optional[dict[str, str]] = None
+
+
+def _get_prompt_proposal() -> Optional[dict[str, str]]:
+    return _prompt_proposal
+
+
+def _set_prompt_proposal(value: Optional[dict[str, str]]) -> None:
+    global _prompt_proposal
+    _prompt_proposal = value
 _last_openai_latency_ms: float = 0.0
 
 
@@ -3756,48 +3769,29 @@ async def cmd_quietflush(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def cmd_promptproposal(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    global _prompt_proposal
-    if not _owner_only(update):
-        return
-    raw = update.message.text.partition(" ")[2].strip()
-    if not raw:
-        if _prompt_proposal:
-            await _reply(update, f"Pending proposal: mode={_prompt_proposal['mode']} chars={len(_prompt_proposal['text'])}. Use `/promptapprove` or `/promptreject`.")
-        else:
-            await _reply(update, "Use: `/promptproposal <strict|normal> <text>`")
-        return
-    parts = raw.split(" ", 1)
-    mode = parts[0].strip().lower()
-    if mode not in MODES:
-        await _reply(update, "Mode must be `strict`, `normal`, or `overseer`.")
-        return
-    if len(parts) < 2 or not parts[1].strip():
-        await _reply(update, "Missing proposal text.")
-        return
-    _prompt_proposal = {"mode": mode, "text": parts[1].strip()}
-    await _reply(update, f"📝 Proposal stored for {mode} ({len(parts[1].strip())} chars). Run `/promptapprove` to apply or `/promptreject` to discard.")
+    await cmd_promptproposal_impl(
+        update=update,
+        owner_only=_owner_only,
+        reply=_reply,
+        modes=MODES,
+        get_prompt_proposal=_get_prompt_proposal,
+        set_prompt_proposal=_set_prompt_proposal,
+    )
 
 
 async def cmd_promptapprove(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    global _prompt_proposal
-    if not _owner_only(update):
-        return
-    if not _prompt_proposal:
-        await _reply(update, "No pending prompt proposal.")
-        return
-    mode = _prompt_proposal["mode"]
-    text = _prompt_proposal["text"]
-    _set_runtime_prompt(mode, text)
-    _prompt_proposal = None
-    await _reply(update, f"✅ Proposal applied to {mode} prompt.")
+    await cmd_promptapprove_impl(
+        update=update,
+        owner_only=_owner_only,
+        reply=_reply,
+        get_prompt_proposal=_get_prompt_proposal,
+        set_prompt_proposal=_set_prompt_proposal,
+        set_runtime_prompt=_set_runtime_prompt,
+    )
 
 
 async def cmd_promptreject(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    global _prompt_proposal
-    if not _owner_only(update):
-        return
-    _prompt_proposal = None
-    await _reply(update, "✅ Prompt proposal discarded.")
+    await cmd_promptreject_impl(update=update, owner_only=_owner_only, reply=_reply, set_prompt_proposal=_set_prompt_proposal)
 
 
 def _run_checkup_sync() -> str:
@@ -4280,82 +4274,7 @@ async def cmd_panicunlock(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
-    await _reply(update, """*XaviExecutor V5 Commands*
-
-*Memory*
-/remember key: value — save a fact
-/delfact key — delete a fact
-/facts — list all facts
-/memories [limit] — list semantic memory
-/memadd text — add pinned memory
-/memdel id — delete memory
-/addtask [priority:] desc — add a task
-/donetask id — close a task
-/tasks — list open tasks
-
-*Control*
-/mode [strict|normal|overseer] — get or set mode
-/promptshow — show active runtime prompt
-/promptset mode text — set runtime prompt (strict/normal/overseer)
-/promptproposal mode text — stage prompt change proposal (strict/normal/overseer)
-/promptapprove — apply staged prompt proposal
-/promptreject — reject staged prompt proposal
-/quiethours HH:MM-HH:MM — queue notifications during quiet window
-/quietoff — disable quiet hours
-/quietflush — flush queued notifications now
-/status — system status
-/health — health summary
-/checkup — dependency/env drift check
-/state_check — compare canonical runtime snapshot vs DB/settings
-/state_repair — repair DB/settings from runtime snapshot
-/op_sanity [hours] — instrumentation sanity check and anomaly scan
-/diagnose [days] — ops diagnosis from instrumentation signals
-/improve_propose [days] — generate a data-backed improvement proposal
-/improve_list — list recent improvement proposals
-/improve_compile <proposal_id> — compile proposal into typed change artifact
-/improve_artifacts [proposal_id] — list change artifacts
-/improve_simulate <proposal_id> — run simulation gate for a proposal
-/improve_runs [proposal_id] — list recent simulation runs
-/improve_compare <proposal_id> [window_days] — compare before/after impact
-/improve_policy [manual|assisted|auto_low] — set promotion autonomy policy
-/improve_promote <proposal_id> [force <reason>] — promote proposal with risk-policy checks
-/improve_autopromote — auto-promote low-risk proposals (policy=auto_low)
-/improve_funnel [days] — report proposal→artifact→simulation→promotion→impact funnel
-/improve_eval_report [days] — consolidated evaluation report for paper/stability
-/improve_weekly_report [weeks] — weekly trend report (headline metrics + confidence)
-/improve_phase [baseline|improving] — controlled live evaluation phase tag
-/improve_log_rollback <artifact_id> <reason> — log rollback telemetry event
-/evolve_capture <proposal_id> — persist proposal outcome lesson into evolution memory
-/evolve_memory [limit] — show recent evolution memory lessons
-/plan goal — create execution manifest
-/go — execute staged manifest
-/topskills — most used skills
-/clearctx — clear conversation context
-/exec command — run through agent
-/attachdiag — show latest attachment extraction diagnostics
-/panicstatus — show panic-lock state
-/paniclock arm|confirm <token> — enable panic-lock (2-step)
-/panicunlock <code> — disable panic-lock (requires env code)
-
-*Skills*
-/skills — list skills
-/skillon name — enable skill
-/skilloff name — disable skill
-
-*Cron Jobs*
-/cronadd name | schedule | skill_type | description | args_json
-/cronrm name — remove job
-/cronlist — list jobs
-/cronon name — enable job
-/cronoff name — disable job
-/cronrun name — run now
-/cronruns name [limit] — recent runs
-
-Cron skill_types: run_shell, browse_page, read_file, write_file, append_file, agent, memory_cleanup, db_backup, prompt_review, checkup, system_map_refresh
-Schedule: cron syntax or natural language like every day at 9am
-""")
+    await cmd_help_impl(update=update, owner_only=_owner_only, reply=_reply)
 
 
 async def cmd_unknown(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
