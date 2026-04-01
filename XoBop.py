@@ -40,7 +40,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import urlparse
 
 import requests
 from apscheduler.executors.asyncio import AsyncIOExecutor
@@ -80,6 +79,7 @@ from xobop.attachments import extract_docx_text, extract_xlsx_text, summarize_zi
 from xobop.commands_core import build_attachdiag_text, build_state_check_text, build_status_text
 from xobop.commands_ops import parse_int_or_default
 from xobop.text_math import cosine as tm_cosine, deterministic_hash as tm_hash, hours_since as tm_hours_since, recency_score as tm_recency_score, split_words as tm_split_words
+from xobop.policy_helpers import blocked_suffix as ph_blocked_suffix, domain_allowed as ph_domain_allowed, is_under_root as ph_is_under_root
 from xobop.improve import (
     apply_artifact_to_runtime_settings as improve_apply_artifact_to_runtime_settings,
     artifact_contract as improve_artifact_contract,
@@ -836,11 +836,7 @@ def _shorten_or_artifact(prefix: str, text: str) -> tuple[str, Optional[str]]:
 
 
 def _is_under_root(path: Path, root: Path) -> bool:
-    try:
-        path.resolve().relative_to(root)
-        return True
-    except ValueError:
-        return False
+    return ph_is_under_root(path, root)
 
 
 def _classify_shell(command: str) -> ShellPolicy:
@@ -931,33 +927,16 @@ def _recency_score(ts_text: str) -> float:
 
 
 def _domain_allowed(url: str) -> bool:
-    raw = _get_policy("allowed_http_domains", "").strip()
-    if not raw:
-        return True
-    allowed = [d.strip().lower() for d in raw.split(",") if d.strip()]
-    host = (urlparse(url).hostname or "").lower()
-    return any(host == d or host.endswith("." + d) for d in allowed)
+    return ph_domain_allowed(url, _get_policy)
 
 
 def _blocked_suffix(path: Path) -> Optional[str]:
-    blocked_raw = _get_policy("blocked_write_suffixes", DEFAULT_GLOBAL_POLICIES["blocked_write_suffixes"])
-    blocked = [s.strip().lower() for s in blocked_raw.split(",") if s.strip()]
-    lower_name = path.name.lower()
-
-    # Allow code-generation in sandbox area while keeping core repo protection.
-    # This avoids false negatives for tests that intentionally write .py/.sh files.
-    try:
-        sandbox_root = (ALLOWED_WRITE_ROOT / "agent-test").resolve()
-        in_sandbox = _is_under_root(path.resolve(), sandbox_root)
-    except Exception:
-        in_sandbox = False
-
-    for suffix in blocked:
-        if lower_name.endswith(suffix):
-            if in_sandbox and suffix in {".py", ".sh"}:
-                continue
-            return suffix
-    return None
+    return ph_blocked_suffix(
+        path,
+        get_policy=_get_policy,
+        default_blocked_suffixes=DEFAULT_GLOBAL_POLICIES["blocked_write_suffixes"],
+        allowed_write_root=ALLOWED_WRITE_ROOT,
+    )
 
 
 def _enforce_rate_limit(bucket: str, limit: int, weight: int = 1) -> tuple[bool, str]:
