@@ -85,6 +85,11 @@ from xobop.runtime_state import (
 )
 from xobop.mode_utils import mode_help_text as mu_mode_help_text, temperature_for_mode as mu_temperature_for_mode
 from xobop.ops_logging import record_op_event as ol_record_op_event, record_run as ol_record_run, update_skill_usage as ol_update_skill_usage
+from xobop.runtime_snapshot import (
+    export_runtime_snapshot as rsnap_export,
+    load_runtime_snapshot as rsnap_load,
+    startup_reconcile_runtime_state as rsnap_startup_reconcile,
+)
 from xobop.io_text import fetch_text_limited as io_fetch_text_limited, read_text_limited as io_read_text_limited
 from xobop.shell_policy import classify_shell as sp_classify_shell, user_forced as sp_user_forced
 from xobop.improve import (
@@ -415,20 +420,16 @@ def _runtime_state_payload(*, last_applied_artifact_id: Optional[int] = None, la
 
 
 def _export_runtime_snapshot(*, last_applied_artifact_id: Optional[int] = None, last_promotion_mode: str = "") -> None:
-    data = _runtime_state_payload(last_applied_artifact_id=last_applied_artifact_id, last_promotion_mode=last_promotion_mode)
-    RUNTIME_SNAPSHOT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    RUNTIME_SNAPSHOT_FILE.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    return rsnap_export(
+        snapshot_file=RUNTIME_SNAPSHOT_FILE,
+        payload_builder=_runtime_state_payload,
+        last_applied_artifact_id=last_applied_artifact_id,
+        last_promotion_mode=last_promotion_mode,
+    )
 
 
 def _load_runtime_snapshot() -> dict[str, Any]:
-    try:
-        if RUNTIME_SNAPSHOT_FILE.exists():
-            d = json.loads(RUNTIME_SNAPSHOT_FILE.read_text(encoding="utf-8"))
-            if isinstance(d, dict):
-                return d
-    except Exception:
-        pass
-    return {}
+    return rsnap_load(snapshot_file=RUNTIME_SNAPSHOT_FILE)
 
 
 def _state_check_dict() -> dict[str, Any]:
@@ -4910,20 +4911,16 @@ def _apply_self_mods_to_runtime() -> None:
 
 
 def _startup_reconcile_runtime_state() -> None:
-    snap = _load_runtime_snapshot()
-    if not snap:
-        # No canonical snapshot yet; fall back to legacy file and export a baseline snapshot
-        _apply_self_mods_to_runtime()
-        _export_runtime_snapshot(last_applied_artifact_id=_get_last_applied_artifact_id())
-        return
-
-    check = _state_check_dict()
-    if not check["match"]:
-        # Canonical snapshot is source of truth
-        _repair_state_from_snapshot()
-        _set_setting("runtime_state_drift", json.dumps(check.get("mismatched", {}), sort_keys=True))
-    else:
-        _set_setting("runtime_state_drift", "{}")
+    return rsnap_startup_reconcile(
+        load_snapshot=_load_runtime_snapshot,
+        apply_self_mods_to_runtime=_apply_self_mods_to_runtime,
+        export_runtime_snapshot_fn=_export_runtime_snapshot,
+        get_last_applied_artifact_id=_get_last_applied_artifact_id,
+        state_check_dict=_state_check_dict,
+        repair_state_from_snapshot=_repair_state_from_snapshot,
+        set_setting=_set_setting,
+        json_dumps=json.dumps,
+    )
 
 
 def main() -> None:
