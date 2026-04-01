@@ -6,6 +6,25 @@ from typing import Any, Callable, Awaitable
 
 from openai import RateLimitError
 
+_PENDING_BG_TASKS: set[asyncio.Task] = set()
+
+
+def _track_bg_task(task: asyncio.Task, *, label: str, log) -> None:
+    _PENDING_BG_TASKS.add(task)
+
+    def _done(t: asyncio.Task) -> None:
+        _PENDING_BG_TASKS.discard(t)
+        try:
+            exc = t.exception()
+            if exc:
+                log.warning("Background task [%s] failed: %s", label, exc)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            log.warning("Background task [%s] completion check failed: %s", label, e)
+
+    task.add_done_callback(_done)
+
 
 async def run_agent_loop(
     *,
@@ -52,7 +71,7 @@ async def run_agent_loop(
         loop = asyncio.get_running_loop()
         fire_and_forget(loop, lambda: save_message(chat_id, "user", query), label="save_user_msg")
         hist.append(user_msg)
-        asyncio.create_task(maybe_promote_memory(query, source="user"))
+        _track_bg_task(asyncio.create_task(maybe_promote_memory(query, source="user")), label="maybe_promote_memory", log=log)
 
     final_text = "✓"
     round_count = 0

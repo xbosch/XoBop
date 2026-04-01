@@ -965,6 +965,7 @@ def _deterministic_hash(token: str) -> int:
 
 
 def _fallback_embedding(text: str, dims: int = 256) -> list[float]:
+    log.warning("Embedding API unavailable; using approximate fallback embedding. Semantic recall quality may degrade.")
     vec = [0.0] * dims
     counts = Counter(_split_words(text))
     if not counts:
@@ -1095,6 +1096,10 @@ def _log_future_exception(fut: asyncio.Future, label: str) -> None:
     exc = fut.exception()
     if exc:
         log.error("Background task [%s] raised: %s", label, exc)
+
+
+async def _to_thread(fn, *args, **kwargs):
+    return await asyncio.to_thread(fn, *args, **kwargs)
 
 
 def _fire_and_forget(loop: asyncio.AbstractEventLoop, fn, label: str) -> None:
@@ -2052,8 +2057,7 @@ async def _exec_file_read(skill: SkillDef, policies: dict, args: dict) -> tuple[
     path = Path(args["path"]).expanduser().resolve()
     if not _is_under_root(path, root):
         return f"⛔ Path outside read root: {root}", None, "blocked", None
-    loop = asyncio.get_running_loop()
-    full = await loop.run_in_executor(None, lambda: _read_text_limited(path, max_bytes))
+    full = await _to_thread(_read_text_limited, path, max_bytes)
     result, artifact = _shorten_or_artifact(skill.name, full)
     return result, None, "ok", artifact
 
@@ -2063,8 +2067,7 @@ async def _exec_http_get(skill: SkillDef, policies: dict, args: dict) -> tuple[s
     if not _domain_allowed(url):
         return "⛔ URL domain blocked by global policy.", None, "blocked", None
     max_bytes = int(policies.get("max_bytes", str(MAX_BROWSE_BYTES)))
-    loop = asyncio.get_running_loop()
-    full = await loop.run_in_executor(None, lambda: _fetch_text_limited(url, max_bytes))
+    full = await _to_thread(_fetch_text_limited, url, max_bytes)
     result, artifact = _shorten_or_artifact(skill.name, full)
     return result, None, "ok", artifact
 
@@ -2084,13 +2087,11 @@ async def _exec_file_write(skill: SkillDef, policies: dict, args: dict) -> tuple
     if path.exists() and not overwrite:
         return f"⛔ Blocked overwrite without overwrite=true: {path}", None, "blocked", None
 
-    loop = asyncio.get_running_loop()
-
     def _do_write():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
 
-    await loop.run_in_executor(None, _do_write)
+    await _to_thread(_do_write)
     return f"Written {len(content):,} chars → {path}", None, "ok", None
 
 
@@ -2106,14 +2107,12 @@ async def _exec_file_append(skill: SkillDef, policies: dict, args: dict) -> tupl
     if len(content.encode("utf-8")) > int(_get_policy("max_write_size", DEFAULT_GLOBAL_POLICIES["max_write_size"])):
         return "⛔ Write size exceeds global policy.", None, "blocked", None
 
-    loop = asyncio.get_running_loop()
-
     def _do_append():
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as f:
             f.write(content)
 
-    await loop.run_in_executor(None, _do_append)
+    await _to_thread(_do_append)
     return f"Appended {len(content):,} chars → {path}", None, "ok", None
 
 
@@ -2196,20 +2195,22 @@ async def _call_skill(chat_id: int, user_query: str, mode: str, skill_name: str,
         if _user_forced(user_query):
             _record_op_event("manual_override", chat_id=chat_id, route=skill_name, status="ok")
 
+        handler_registry = {
+            "file_read": lambda: _exec_file_read(skill, policies, args),
+            "http_get": lambda: _exec_http_get(skill, policies, args),
+            "file_write": lambda: _exec_file_write(skill, policies, args),
+            "file_append": lambda: _exec_file_append(skill, policies, args),
+            "shell_command": lambda: _exec_shell_command(skill, policies, user_query, args),
+        }
+
         if skill.requires_force and not _user_forced(user_query):
             result, status = f"⛔ Skill '{skill.name}' requires force.", "blocked"
-        elif skill.handler_type == "file_read":
-            result, exit_code, status, artifact_path = await _exec_file_read(skill, policies, args)
-        elif skill.handler_type == "http_get":
-            result, exit_code, status, artifact_path = await _exec_http_get(skill, policies, args)
-        elif skill.handler_type == "file_write":
-            result, exit_code, status, artifact_path = await _exec_file_write(skill, policies, args)
-        elif skill.handler_type == "file_append":
-            result, exit_code, status, artifact_path = await _exec_file_append(skill, policies, args)
-        elif skill.handler_type == "shell_command":
-            result, exit_code, status, artifact_path = await _exec_shell_command(skill, policies, user_query, args)
         else:
-            result, status = f"Unknown handler_type: {skill.handler_type}", "error"
+            fn = handler_registry.get(skill.handler_type)
+            if not fn:
+                result, status = f"Unknown handler_type: {skill.handler_type}", "error"
+            else:
+                result, exit_code, status, artifact_path = await fn()
 
     except asyncio.TimeoutError as exc:
         result, status = f"⏱ Timeout: {exc}", "timeout"
