@@ -90,6 +90,7 @@ from xobop.runtime_snapshot import (
     load_runtime_snapshot as rsnap_load,
     startup_reconcile_runtime_state as rsnap_startup_reconcile,
 )
+from xobop.selfmods import apply_self_mods_defaults as sm_apply_defaults, export_self_mods_debug as sm_export_debug
 from xobop.io_text import fetch_text_limited as io_fetch_text_limited, read_text_limited as io_read_text_limited
 from xobop.shell_policy import classify_shell as sp_classify_shell, user_forced as sp_user_forced
 from xobop.improve import (
@@ -449,17 +450,12 @@ def _repair_state_from_snapshot() -> str:
 
 
 def _export_self_mods_debug() -> None:
-    """Best-effort debug export only; DB settings remain source of truth."""
-    try:
-        payload = {
-            "command_aliases": _get_command_aliases(),
-            "exec_retry_limit": _get_exec_retry_limit(),
-            "last_applied_artifact_id": _get_last_applied_artifact_id(),
-        }
-        SELF_MODS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        SELF_MODS_FILE.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    except Exception:
-        pass
+    return sm_export_debug(
+        self_mods_file=SELF_MODS_FILE,
+        get_command_aliases=_get_command_aliases,
+        get_exec_retry_limit=_get_exec_retry_limit,
+        get_last_applied_artifact_id=_get_last_applied_artifact_id,
+    )
 
 
 def _get_command_aliases() -> dict[str, str]:
@@ -4900,13 +4896,7 @@ async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def _apply_self_mods_to_runtime() -> None:
-    # DB is source of truth; ensure sane defaults if missing.
-    if _get_setting("command_aliases_json") is None:
-        _set_setting("command_aliases_json", "{}")
-    if _get_setting("exec_retry_limit") is None:
-        _set_setting("exec_retry_limit", "0")
-    if _get_setting("last_applied_artifact_id") is None:
-        _set_setting("last_applied_artifact_id", "0")
+    sm_apply_defaults(get_setting=_get_setting, set_setting=_set_setting)
     _export_self_mods_debug()
 
 
