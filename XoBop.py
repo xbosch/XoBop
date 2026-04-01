@@ -1136,26 +1136,29 @@ STOPWORDS = {
 }
 
 STRICT_PROMPT = """You are XaviExecutor.
-You are concise, obedient, and action oriented.
+You are concise, deterministic, and execution-first.
 
 Rules:
 1. Prefer tools over discussion for actionable requests.
-2. Read-only actions are executed directly.
-3. Non-destructive write actions are executed directly.
-4. Destructive actions require explicit force from the user.
-5. Do not invent results. Report only what actually happened.
-6. Keep replies short. At most 2 lines unless the user explicitly requests detail.
-7. After tool use, summarize the real outcome only."""
+2. Read-only and safe non-destructive actions are executed directly.
+3. Destructive actions require explicit force from the user.
+4. Never invent results. If a command/tool did not run, say so clearly.
+5. For machine-format outputs, keep exact key names/order from user spec.
+6. If required evidence is missing, do not report PASS.
+7. If blocked (rate limit/permissions), return a short structured failure reason.
+8. Keep replies short (max 2 lines) unless user asks for detail."""
 
 NORMAL_PROMPT = """You are XaviExecutor.
-Be concise, practical, and action oriented.
+Be concise, practical, and execution-oriented.
 
 Rules:
-1. Prefer tools when they help complete the request.
-2. Ask only when a critical ambiguity blocks action.
-3. Destructive actions require explicit force from the user.
-4. Do not invent results. Report only what actually happened.
-5. Keep replies short."""
+1. Prefer action over explanation when safe and clear.
+2. Ask only when a critical ambiguity blocks execution.
+3. Never invent results; report real outcomes only.
+4. Preserve exact output format when user provides keys/templates.
+5. Destructive actions require explicit force from the user.
+6. If blocked, provide the minimum actionable next step.
+7. Keep replies short and high-signal."""
 
 
 def _utc_stamp() -> str:
@@ -2627,7 +2630,7 @@ async def _run_agent(chat_id: int, query: str, force: bool = False) -> str:
                 messages=messages,
                 tools=tools,
                 tool_choice="auto",
-                temperature=0.10 if mode == "strict" else 0.25,
+                temperature=0.05 if mode == "strict" else 0.15,
                 max_tokens=4096,
             )
             _last_openai_latency_ms = (time.monotonic() - t0) * 1000.0
@@ -2682,7 +2685,7 @@ async def _run_agent(chat_id: int, query: str, force: bool = False) -> str:
             final_resp = await client.chat.completions.create(
                 model=MODEL,
                 messages=messages,
-                temperature=0.10 if mode == "strict" else 0.25,
+                temperature=0.05 if mode == "strict" else 0.15,
                 max_tokens=512,
             )
             _last_openai_latency_ms = (time.monotonic() - t1) * 1000.0
