@@ -115,6 +115,19 @@ from xobop.commands_improve import (
     cmd_improve_simulate_impl,
     cmd_improve_weekly_report_impl,
 )
+from xobop.commands_memory import (
+    cmd_addtask_impl,
+    cmd_donetask_impl,
+    cmd_evolve_capture_impl,
+    cmd_evolve_memory_impl,
+    cmd_facts_impl,
+    cmd_memadd_impl,
+    cmd_memdel_impl,
+    cmd_memories_impl,
+    cmd_remember_impl,
+    cmd_tasks_impl,
+    cmd_topskills_impl,
+)
 from xobop.io_text import fetch_text_limited as io_fetch_text_limited, read_text_limited as io_read_text_limited
 from xobop.shell_policy import classify_shell as sp_classify_shell, user_forced as sp_user_forced
 from xobop.improve import (
@@ -3732,16 +3745,13 @@ async def _reply(update: Update, text: str) -> None:
 
 
 async def cmd_remember(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
-    body = update.message.text.partition(" ")[2].strip()
-    parts = body.split(":", 1)
-    if len(parts) == 2:
-        key, value = parts[0], parts[1]
-        await _reply(update, _save_fact(key, value))
-        asyncio.create_task(_save_fact_memory(key.strip().lower(), value.strip()))
-    else:
-        await _reply(update, "Use: `/remember key: value`")
+    await cmd_remember_impl(
+        update=update,
+        owner_only=_owner_only,
+        reply=_reply,
+        save_fact=_save_fact,
+        save_fact_memory=_save_fact_memory,
+    )
 
 
 async def cmd_delfact(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3752,35 +3762,19 @@ async def cmd_delfact(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_addtask(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
-    body = update.message.text.partition(" ")[2].strip()
-    parts = body.split(":", 1)
-    if len(parts) == 2 and parts[0].strip().lower() in {"low", "normal", "high"}:
-        priority, desc = parts[0].strip(), parts[1].strip()
-    else:
-        priority, desc = "normal", body
-    await _reply(update, _add_task(desc, priority) if desc else "Need description.")
+    await cmd_addtask_impl(update=update, owner_only=_owner_only, reply=_reply, add_task=_add_task)
 
 
 async def cmd_donetask(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
-    raw = update.message.text.partition(" ")[2].strip()
-    try:
-        await _reply(update, _close_task(int(raw)))
-    except ValueError:
-        await _reply(update, "Use: `/donetask <id>`")
+    await cmd_donetask_impl(update=update, owner_only=_owner_only, reply=_reply, close_task=_close_task)
 
 
 async def cmd_facts(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if _owner_only(update):
-        await _reply(update, _get_facts())
+    await cmd_facts_impl(update=update, owner_only=_owner_only, reply=_reply, get_facts=_get_facts)
 
 
 async def cmd_tasks(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if _owner_only(update):
-        await _reply(update, _get_tasks())
+    await cmd_tasks_impl(update=update, owner_only=_owner_only, reply=_reply, get_tasks=_get_tasks)
 
 
 async def cmd_mode(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4242,67 +4236,38 @@ async def cmd_improve_log_rollback(update: Update, ctx: ContextTypes.DEFAULT_TYP
 
 
 async def cmd_evolve_capture(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
-    raw = update.message.text.partition(" ")[2].strip()
-    try:
-        pid = int(raw)
-    except Exception:
-        await _reply(update, "Use: `/evolve_capture <proposal_id>`")
-        return
-    loop = asyncio.get_running_loop()
-    rep = await loop.run_in_executor(None, lambda: _capture_evolution_memory_sync(pid))
-    await _reply(update, rep)
+    await cmd_evolve_capture_impl(
+        update=update,
+        owner_only=_owner_only,
+        reply=_reply,
+        to_thread=_to_thread,
+        capture_evolution_memory_sync=_capture_evolution_memory_sync,
+    )
 
 
 async def cmd_evolve_memory(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
-    raw = update.message.text.partition(" ")[2].strip()
-    try:
-        limit = int(raw) if raw else 10
-    except Exception:
-        limit = 10
-    await _reply(update, _evolution_memory_report(limit))
+    await cmd_evolve_memory_impl(
+        update=update,
+        owner_only=_owner_only,
+        reply=_reply,
+        evolution_memory_report=_evolution_memory_report,
+    )
 
 
 async def cmd_topskills(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if _owner_only(update):
-        await _reply(update, _top_skills())
+    await cmd_topskills_impl(update=update, owner_only=_owner_only, reply=_reply, top_skills=_top_skills)
 
 
 async def cmd_memories(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
-    raw = update.message.text.partition(" ")[2].strip()
-    try:
-        limit = int(raw) if raw else 20
-    except ValueError:
-        limit = 20
-    await _reply(update, _list_memories(limit))
+    await cmd_memories_impl(update=update, owner_only=_owner_only, reply=_reply, list_memories=_list_memories)
 
 
 async def cmd_memadd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
-    text = update.message.text.partition(" ")[2].strip()
-    if not text:
-        await _reply(update, "Use: `/memadd text`")
-        return
-    memory_id = await _add_memory(text, mem_type="manual", importance=0.9, source="telegram", pinned=True)
-    await _reply(update, f"✓ Memory #{memory_id} added.")
+    await cmd_memadd_impl(update=update, owner_only=_owner_only, reply=_reply, add_memory=_add_memory)
 
 
 async def cmd_memdel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
-    raw = update.message.text.partition(" ")[2].strip()
-    try:
-        memory_id = int(raw)
-    except ValueError:
-        await _reply(update, "Use: `/memdel <id>`")
-        return
-    await _reply(update, _delete_memory_sync(memory_id))
+    await cmd_memdel_impl(update=update, owner_only=_owner_only, reply=_reply, delete_memory_sync=_delete_memory_sync)
 
 
 async def cmd_exec(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
