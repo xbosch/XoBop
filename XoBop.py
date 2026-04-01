@@ -136,6 +136,15 @@ from xobop.commands_safety import (
     cmd_panicunlock_impl,
 )
 from xobop.commands_skills import cmd_skilloff_impl, cmd_skillon_impl, cmd_skills_impl
+from xobop.commands_cron import (
+    cmd_cronadd_impl,
+    cmd_cronlist_impl,
+    cmd_cronoff_impl,
+    cmd_cronon_impl,
+    cmd_cronrm_impl,
+    cmd_cronrun_impl,
+    cmd_cronruns_impl,
+)
 from xobop.io_text import fetch_text_limited as io_fetch_text_limited, read_text_limited as io_read_text_limited
 from xobop.shell_policy import classify_shell as sp_classify_shell, user_forced as sp_user_forced
 from xobop.improve import (
@@ -4302,145 +4311,74 @@ async def cmd_skilloff(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_cronadd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
-    if _panic_locked():
-        await _reply(update, "⛔ Panic-lock active: /cronadd disabled.")
-        return
-    body = update.message.text.partition(" ")[2].strip()
-
-    # tolerate optional trailing force token: "... | {json} force"
-    body = re.sub(r"\s+force\s*$", "", body, flags=re.I)
-
-    parts = [p.strip() for p in body.split("|")]
-    if len(parts) < 3:
-        await _reply(update, "Use: `/cronadd name | schedule | skill_type | description | args_json`")
-        return
-
-    name = parts[0]
-    schedule = parts[1]
-    skill_type = parts[2]
-    description = parts[3] if len(parts) > 3 else ""
-    args_raw = parts[4] if len(parts) > 4 else "{}"
-
-    try:
-        skill_args = json.loads(args_raw)
-    except json.JSONDecodeError:
-        await _reply(update, f"Invalid JSON for args: {args_raw}")
-        return
-
-    cron_expr = _parse_cron_expr(schedule)
-    if not cron_expr:
-        await _reply(update, f"Trying to parse as natural language: _{schedule}_")
-        cron_expr = await _parse_nl_to_cron(schedule)
-        if not cron_expr:
-            await _reply(update, f"Could not parse schedule: {schedule}")
-            return
-        await _reply(update, f"Schedule interpreted as cron: `{cron_expr}`")
-
-    result = _add_cron_job(name, description, cron_expr, skill_type, skill_args)
-    scheduler = ctx.bot_data.get("scheduler")
-    if scheduler:
-        _sync_scheduler(scheduler)
-    await _reply(update, result)
+    await cmd_cronadd_impl(
+        update=update,
+        ctx=ctx,
+        owner_only=_owner_only,
+        reply=_reply,
+        panic_locked=_panic_locked,
+        parse_cron_expr=_parse_cron_expr,
+        parse_nl_to_cron=_parse_nl_to_cron,
+        add_cron_job=_add_cron_job,
+        sync_scheduler=_sync_scheduler,
+    )
 
 
 async def cmd_cronrm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
-    if _panic_locked():
-        await _reply(update, "⛔ Panic-lock active: /cronrm disabled.")
-        return
-    name = update.message.text.partition(" ")[2].strip()
-    if not name:
-        await _reply(update, "Use: `/cronrm <name>`")
-        return
-    result = _remove_cron_job(name)
-    scheduler = ctx.bot_data.get("scheduler")
-    if scheduler:
-        try:
-            scheduler.remove_job(name)
-        except Exception:
-            pass
-    await _reply(update, result)
+    await cmd_cronrm_impl(
+        update=update,
+        ctx=ctx,
+        owner_only=_owner_only,
+        reply=_reply,
+        panic_locked=_panic_locked,
+        remove_cron_job=_remove_cron_job,
+    )
 
 
 async def cmd_cronlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if _owner_only(update):
-        await _reply(update, _list_cron_jobs())
+    await cmd_cronlist_impl(update=update, owner_only=_owner_only, reply=_reply, list_cron_jobs=_list_cron_jobs)
 
 
 async def cmd_cronon(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
-    if _panic_locked():
-        await _reply(update, "⛔ Panic-lock active: /cronon disabled.")
-        return
-    name = update.message.text.partition(" ")[2].strip()
-    if not name:
-        await _reply(update, "Use: `/cronon <name>`")
-        return
-    result = _toggle_cron_job(name, True)
-    scheduler = ctx.bot_data.get("scheduler")
-    if scheduler:
-        _sync_scheduler(scheduler)
-    await _reply(update, result)
+    await cmd_cronon_impl(
+        update=update,
+        ctx=ctx,
+        owner_only=_owner_only,
+        reply=_reply,
+        panic_locked=_panic_locked,
+        toggle_cron_job=_toggle_cron_job,
+        sync_scheduler=_sync_scheduler,
+    )
 
 
 async def cmd_cronoff(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
-    if _panic_locked():
-        await _reply(update, "⛔ Panic-lock active: /cronoff disabled.")
-        return
-    name = update.message.text.partition(" ")[2].strip()
-    if not name:
-        await _reply(update, "Use: `/cronoff <name>`")
-        return
-    result = _toggle_cron_job(name, False)
-    scheduler = ctx.bot_data.get("scheduler")
-    if scheduler:
-        try:
-            scheduler.remove_job(name)
-        except Exception:
-            pass
-    await _reply(update, result)
+    await cmd_cronoff_impl(
+        update=update,
+        ctx=ctx,
+        owner_only=_owner_only,
+        reply=_reply,
+        panic_locked=_panic_locked,
+        toggle_cron_job=_toggle_cron_job,
+    )
 
 
 async def cmd_cronruns(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
-    parts = update.message.text.partition(" ")[2].strip().split()
-    name = parts[0] if parts else ""
-    try:
-        limit = int(parts[1]) if len(parts) > 1 else 5
-    except ValueError:
-        await _reply(update, "Limit must be a number. Use: `/cronruns <name> [limit]`")
-        return
-    if not name:
-        await _reply(update, "Use: `/cronruns <name> [limit]`")
-        return
-    await _reply(update, _get_cron_runs(name, limit))
+    await cmd_cronruns_impl(update=update, owner_only=_owner_only, reply=_reply, get_cron_runs=_get_cron_runs)
 
 
 async def cmd_cronrun(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
-    if _panic_locked():
-        await _reply(update, "⛔ Panic-lock active: /cronrun disabled.")
-        return
-    name = update.message.text.partition(" ")[2].strip()
-    if not name:
-        await _reply(update, "Use: `/cronrun <name>`")
-        return
-    with get_db() as conn:
-        row = conn.execute("SELECT name FROM cron_jobs WHERE name=?", (name,)).fetchone()
-    if not row:
-        await _reply(update, f"Job not found: {name}")
-        return
-    await _reply(update, f"▶️ Running job: _{name}_…")
-    await update.message.chat.send_action(ChatAction.TYPING)
-    asyncio.create_task(_run_cron_job(name))
+    async def _run_cron_job_background(name: str):
+        asyncio.create_task(_run_cron_job(name))
+
+    await cmd_cronrun_impl(
+        update=update,
+        owner_only=_owner_only,
+        reply=_reply,
+        panic_locked=_panic_locked,
+        get_db=get_db,
+        run_cron_job=_run_cron_job_background,
+        chat_action_typing=lambda u: u.message.chat.send_action(ChatAction.TYPING),
+    )
 
 
 async def cmd_clearctx(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
