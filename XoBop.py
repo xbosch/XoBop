@@ -73,6 +73,11 @@ from xobop.output_guardrails import normalize_machine_kv_output
 from xobop.defaults import STOPWORDS, STRICT_PROMPT, NORMAL_PROMPT, default_global_policies
 from xobop.agent import AgentDeps, run_agent_loop
 from xobop.simulation import TempDbManager, shell_golden_cases, shell_replay_cases, ReplayController, apply_artifact_to_temp_settings
+from xobop.runtime_ops import (
+    enforce_rate_limit as ops_enforce_rate_limit,
+    fire_and_forget as ops_fire_and_forget,
+    to_thread as ops_to_thread,
+)
 from xobop.improve import (
     apply_artifact_to_runtime_settings as improve_apply_artifact_to_runtime_settings,
     artifact_contract as improve_artifact_contract,
@@ -975,36 +980,8 @@ def _blocked_suffix(path: Path) -> Optional[str]:
     return None
 
 
-def _record_rate_event(bucket: str, weight: int = 1) -> None:
-    with get_db() as conn:
-        conn.execute(
-            "INSERT INTO rate_events (bucket,weight) VALUES (?,?)",
-            (bucket, weight),
-        )
-        conn.execute(
-            "DELETE FROM rate_events WHERE timestamp < datetime('now', '-2 hours')"
-        )
-
-
-def _count_rate_events(bucket: str, lookback_minutes: int = 1) -> int:
-    with get_db() as conn:
-        row = conn.execute(
-            """
-            SELECT COALESCE(SUM(weight), 0) AS total
-            FROM rate_events
-            WHERE bucket=? AND timestamp >= datetime('now', ?)
-            """,
-            (bucket, f"-{lookback_minutes} minutes"),
-        ).fetchone()
-    return int(row["total"] or 0)
-
-
 def _enforce_rate_limit(bucket: str, limit: int, weight: int = 1) -> tuple[bool, str]:
-    current = _count_rate_events(bucket)
-    if current + weight > limit:
-        return False, f"⛔ Rate limit exceeded for {bucket}: {current}/{limit} in last minute."
-    _record_rate_event(bucket, weight)
-    return True, ""
+    return ops_enforce_rate_limit(get_db, bucket, limit, weight)
 
 
 def _update_skill_usage(skill_name: str, duration_ms: int, status: str) -> None:
@@ -1029,19 +1006,12 @@ def _update_skill_usage(skill_name: str, duration_ms: int, status: str) -> None:
 # =============================================================================
 
 
-def _log_future_exception(fut: asyncio.Future, label: str) -> None:
-    exc = fut.exception()
-    if exc:
-        log.error("Background task [%s] raised: %s", label, exc)
-
-
 async def _to_thread(fn, *args, **kwargs):
-    return await asyncio.to_thread(fn, *args, **kwargs)
+    return await ops_to_thread(fn, *args, **kwargs)
 
 
 def _fire_and_forget(loop: asyncio.AbstractEventLoop, fn, label: str) -> None:
-    fut = loop.run_in_executor(None, fn)
-    fut.add_done_callback(lambda f: _log_future_exception(f, label))
+    return ops_fire_and_forget(loop, fn, label, log=log)
 
 
 # =============================================================================
