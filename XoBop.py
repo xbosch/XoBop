@@ -64,6 +64,7 @@ from xobop.state import STATE
 from xobop.config import settings
 from xobop.capabilities_shell import exec_shell_command
 from xobop.db import db_session, sqlite_online_backup
+from xobop.migrations import apply_migrations
 from xobop.handlers_runtime import process_media_message, process_text_message
 from xobop.router import classify
 from xobop.shell_facade import get_shell_executor
@@ -497,21 +498,8 @@ def _init_db() -> None:
                 content_rowid='id'
             );
         """)
-        # lightweight schema migrations for additive columns
-        cols = {r['name'] for r in conn.execute("PRAGMA table_info(skill_audit)").fetchall()}
-        for col, typ in (("owner_id", "INTEGER"), ("cmd_input", "TEXT"), ("exit_code", "INTEGER")):
-            if col not in cols:
-                conn.execute(f"ALTER TABLE skill_audit ADD COLUMN {col} {typ}")
-
-        run_cols = {r['name'] for r in conn.execute("PRAGMA table_info(improvement_runs)").fetchall()}
-        for col, typ in (("promotion_mode", "TEXT"), ("eval_phase", "TEXT"), ("reason", "TEXT")):
-            if col not in run_cols:
-                conn.execute(f"ALTER TABLE improvement_runs ADD COLUMN {col} {typ}")
-
-        art_cols = {r['name'] for r in conn.execute("PRAGMA table_info(change_artifacts)").fetchall()}
-        for col, typ in (("promotion_mode", "TEXT"), ("eval_phase", "TEXT")):
-            if col not in art_cols:
-                conn.execute(f"ALTER TABLE change_artifacts ADD COLUMN {col} {typ}")
+        # versioned schema migrations
+        apply_migrations(conn)
     # keep FTS mirror aligned
     with get_db() as conn:
         conn.execute("INSERT INTO memory_items_fts(memory_items_fts) VALUES('rebuild')")
