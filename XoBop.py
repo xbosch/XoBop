@@ -79,6 +79,7 @@ from xobop.runtime_ops import (
 from xobop.attachments import extract_docx_text, extract_xlsx_text, summarize_zip
 from xobop.commands_core import build_attachdiag_text, build_state_check_text, build_status_text
 from xobop.commands_ops import parse_int_or_default
+from xobop.text_math import cosine as tm_cosine, deterministic_hash as tm_hash, hours_since as tm_hours_since, recency_score as tm_recency_score, split_words as tm_split_words
 from xobop.improve import (
     apply_artifact_to_runtime_settings as improve_apply_artifact_to_runtime_settings,
     artifact_contract as improve_artifact_contract,
@@ -896,15 +897,11 @@ def _fetch_text_limited(url: str, max_bytes: int = MAX_BROWSE_BYTES) -> str:
 
 
 def _split_words(text: str) -> list[str]:
-    return [w for w in re.findall(r"[A-Za-z0-9_]+", text.lower()) if w not in STOPWORDS]
+    return tm_split_words(text, set(STOPWORDS))
 
 
 def _deterministic_hash(token: str) -> int:
-    h = 2166136261
-    for ch in token:
-        h ^= ord(ch)
-        h = (h * 16777619) & 0xFFFFFFFF
-    return h
+    return tm_hash(token)
 
 
 def _fallback_embedding(text: str, dims: int = 256) -> list[float]:
@@ -922,33 +919,15 @@ def _fallback_embedding(text: str, dims: int = 256) -> list[float]:
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
-    if not a or not b or len(a) != len(b):
-        return 0.0
-    dot = sum(x * y for x, y in zip(a, b))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(y * y for y in b))
-    if na == 0 or nb == 0:
-        return 0.0
-    return dot / (na * nb)
+    return tm_cosine(a, b)
 
 
 def _hours_since(ts_text: str) -> float:
-    try:
-        dt = datetime.fromisoformat(ts_text.replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-    except ValueError:
-        try:
-            dt = datetime.strptime(ts_text, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-        except ValueError:
-            return 99999.0
-    now = datetime.now(timezone.utc)
-    return max(0.0, (now - dt).total_seconds() / 3600.0)
+    return tm_hours_since(ts_text)
 
 
 def _recency_score(ts_text: str) -> float:
-    hours = _hours_since(ts_text)
-    return max(0.0, min(1.0, math.exp(-hours / (24.0 * 14.0))))
+    return tm_recency_score(ts_text)
 
 
 def _domain_allowed(url: str) -> bool:
