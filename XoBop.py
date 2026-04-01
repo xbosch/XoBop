@@ -63,6 +63,7 @@ from xobop.handlers_runtime import process_media_message, process_text_message
 from xobop.bootstrap import build_app, register_handlers
 from xobop.cron_bootstrap import ensure_default_cron_jobs
 from xobop.schema import ensure_core_schema
+from xobop.db_init import initialize_database
 from xobop.router import classify
 from xobop.shell_facade import get_shell_executor
 from xobop.output_guardrails import normalize_machine_kv_output
@@ -215,20 +216,16 @@ def get_db():
 
 
 def _init_db() -> None:
-    with get_db() as conn:
-        ensure_core_schema(conn)
-        # versioned schema migrations
-        apply_migrations(conn)
-    # keep FTS mirror aligned
-    with get_db() as conn:
-        conn.execute("INSERT INTO memory_items_fts(memory_items_fts) VALUES('rebuild')")
-
-    _bootstrap_default_skills()
-    _bootstrap_default_policies()
-    _bootstrap_default_prompts()
-    # ensure periodic default cron jobs exist
-    with get_db() as conn:
-        ensure_default_cron_jobs(conn, os.getcwd())
+    initialize_database(
+        get_db=get_db,
+        ensure_core_schema=ensure_core_schema,
+        apply_migrations=apply_migrations,
+        bootstrap_default_skills=_bootstrap_default_skills,
+        bootstrap_default_policies=_bootstrap_default_policies,
+        bootstrap_default_prompts=_bootstrap_default_prompts,
+        ensure_default_cron_jobs=ensure_default_cron_jobs,
+        repo_cwd=os.getcwd(),
+    )
 
 
 # =============================================================================
