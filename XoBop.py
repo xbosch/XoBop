@@ -41,12 +41,10 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
-import requests
 from apscheduler.executors.asyncio import AsyncIOExecutor
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from bs4 import BeautifulSoup
 from croniter import croniter
 from openai import AsyncOpenAI, RateLimitError
 from telegram import Update
@@ -81,6 +79,8 @@ from xobop.commands_ops import parse_int_or_default
 from xobop.text_math import cosine as tm_cosine, deterministic_hash as tm_hash, hours_since as tm_hours_since, recency_score as tm_recency_score, split_words as tm_split_words
 from xobop.policy_helpers import blocked_suffix as ph_blocked_suffix, domain_allowed as ph_domain_allowed, is_under_root as ph_is_under_root
 from xobop.artifacts_io import shorten_or_artifact as aio_shorten_or_artifact, store_artifact as aio_store_artifact
+from xobop.io_text import fetch_text_limited as io_fetch_text_limited, read_text_limited as io_read_text_limited
+from xobop.shell_policy import classify_shell as sp_classify_shell, user_forced as sp_user_forced
 from xobop.improve import (
     apply_artifact_to_runtime_settings as improve_apply_artifact_to_runtime_settings,
     artifact_contract as improve_artifact_contract,
@@ -849,56 +849,27 @@ def _is_under_root(path: Path, root: Path) -> bool:
 
 
 def _classify_shell(command: str) -> ShellPolicy:
-    cmd = command.strip()
-    for p in DESTRUCTIVE_PATTERNS:
-        if p.search(cmd):
-            return ShellPolicy("destructive", True, SHELL_TIMEOUT_WRITE)
-    for p in WRITE_PATTERNS:
-        if p.search(cmd):
-            return ShellPolicy("write", False, SHELL_TIMEOUT_WRITE)
-    for p in READ_PATTERNS:
-        if p.search(cmd):
-            return ShellPolicy("read", False, SHELL_TIMEOUT_READ)
-    return ShellPolicy("unknown", False, SHELL_TIMEOUT_READ)
+    return sp_classify_shell(
+        command,
+        destructive_patterns=DESTRUCTIVE_PATTERNS,
+        write_patterns=WRITE_PATTERNS,
+        read_patterns=READ_PATTERNS,
+        timeout_read=SHELL_TIMEOUT_READ,
+        timeout_write=SHELL_TIMEOUT_WRITE,
+        policy_cls=ShellPolicy,
+    )
 
 
 def _user_forced(query: str) -> bool:
-    return bool(FORCE_RE.search(query))
+    return sp_user_forced(query, FORCE_RE)
 
 
 def _read_text_limited(path: Path, max_bytes: int = MAX_READ_BYTES) -> str:
-    with path.open("rb") as f:
-        raw = f.read(max_bytes + 1)
-    truncated = len(raw) > max_bytes
-    text = raw[:max_bytes].decode("utf-8", errors="ignore")
-    if truncated:
-        text += "\n[TRUNCATED]"
-    return text
+    return io_read_text_limited(path, max_bytes)
 
 
 def _fetch_text_limited(url: str, max_bytes: int = MAX_BROWSE_BYTES) -> str:
-    with requests.get(url, timeout=REQUEST_TIMEOUT, stream=True) as resp:
-        resp.raise_for_status()
-        chunks: list[bytes] = []
-        total = 0
-        for chunk in resp.iter_content(chunk_size=65536):
-            if not chunk:
-                continue
-            total += len(chunk)
-            if total > max_bytes:
-                remaining = max_bytes - (total - len(chunk))
-                if remaining > 0:
-                    chunks.append(chunk[:remaining])
-                break
-            chunks.append(chunk)
-    html = b"".join(chunks).decode("utf-8", errors="ignore")
-    soup = BeautifulSoup(html, "html.parser")
-    for tag in soup(["script", "style", "nav", "footer"]):
-        tag.decompose()
-    text = soup.get_text(separator="\n", strip=True)
-    if total > max_bytes:
-        text += "\n[TRUNCATED]"
-    return text
+    return io_fetch_text_limited(url, max_bytes=max_bytes, request_timeout=REQUEST_TIMEOUT)
 
 
 def _split_words(text: str) -> list[str]:
