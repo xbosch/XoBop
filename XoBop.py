@@ -66,6 +66,7 @@ from xobop.schema import ensure_core_schema
 from xobop.router import classify
 from xobop.shell_facade import get_shell_executor
 from xobop.output_guardrails import normalize_machine_kv_output
+from xobop.defaults import STOPWORDS, STRICT_PROMPT, NORMAL_PROMPT, default_global_policies
 from xobop.simulation import TempDbManager, shell_golden_cases, shell_replay_cases, ReplayController, apply_artifact_to_temp_settings
 
 # =============================================================================
@@ -234,14 +235,7 @@ def _init_db() -> None:
 # Settings, policies, and defaults
 # =============================================================================
 
-DEFAULT_GLOBAL_POLICIES: dict[str, str] = {
-    "tool_calls_per_minute": "30",
-    "shell_calls_per_minute": "8",
-    "max_write_size": "200000",
-    "blocked_write_suffixes": ".py,.sh,.env,.db,.sqlite,.sqlite3",
-    "allowed_http_domains": "",
-    "memory_cleanup_keep": str(MAX_MEMORY_ITEMS),
-}
+DEFAULT_GLOBAL_POLICIES: dict[str, str] = default_global_policies(MAX_MEMORY_ITEMS)
 
 DEFAULT_SKILLS: list[dict[str, Any]] = [
     {
@@ -773,38 +767,6 @@ def _build_tools_from_db(mode: str) -> list[dict[str, Any]]:
 # =============================================================================
 # Helpers
 # =============================================================================
-
-STOPWORDS = {
-    "the", "and", "for", "that", "with", "from", "this", "have", "will", "your", "you",
-    "into", "about", "what", "when", "where", "which", "there", "their", "then", "than",
-    "just", "also", "only", "were", "been", "being", "they", "them", "does", "did", "done",
-}
-
-STRICT_PROMPT = """You are XaviExecutor.
-You are concise, deterministic, and execution-first.
-
-Rules:
-1. Prefer tools over discussion for actionable requests.
-2. Read-only and safe non-destructive actions are executed directly.
-3. Destructive actions require explicit force from the user.
-4. Never invent results. If a command/tool did not run, say so clearly.
-5. For machine-format outputs, keep exact key names/order from user spec.
-6. If required evidence is missing, do not report PASS.
-7. If blocked (rate limit/permissions), return a short structured failure reason.
-8. Keep replies short (max 2 lines) unless user asks for detail."""
-
-NORMAL_PROMPT = """You are XaviExecutor.
-Be practical, execution-oriented, and clear.
-
-Rules:
-1. Prefer action over explanation when safe and clear.
-2. Ask only when a critical ambiguity blocks execution.
-3. Never invent results; report real outcomes only.
-4. Preserve exact output format when user provides keys/templates.
-5. Destructive actions require explicit force from the user.
-6. If blocked, provide the minimum actionable next step.
-7. Default to short high-signal replies, but allow brief helpful context (3-6 lines) when it improves user success."""
-
 
 def _utc_stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
