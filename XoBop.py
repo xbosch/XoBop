@@ -61,6 +61,7 @@ from xobop.db import db_session, sqlite_online_backup
 from xobop.migrations import apply_migrations
 from xobop.handlers_runtime import process_media_message, process_text_message
 from xobop.bootstrap import build_app, register_handlers
+from xobop.cron_bootstrap import ensure_default_cron_jobs
 from xobop.router import classify
 from xobop.shell_facade import get_shell_executor
 from xobop.output_guardrails import normalize_machine_kv_output
@@ -503,60 +504,9 @@ def _init_db() -> None:
     _bootstrap_default_skills()
     _bootstrap_default_policies()
     _bootstrap_default_prompts()
-    # ensure periodic online DB backup job exists (every 6h)
+    # ensure periodic default cron jobs exist
     with get_db() as conn:
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO cron_jobs (name,description,cron_expr,skill_type,skill_args,enabled,alert_owner,updated_ts)
-            VALUES (?,?,?,?,?,1,1,CURRENT_TIMESTAMP)
-            """,
-            (
-                "db-backup-6h",
-                "Online SQLite backup every 6 hours",
-                "0 */6 * * *",
-                "db_backup",
-                json.dumps({"backup_dir": str((Path(os.getcwd()) / "backups").resolve()), "repo_dir": os.getcwd()}),
-            ),
-        )
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO cron_jobs (name,description,cron_expr,skill_type,skill_args,enabled,alert_owner,updated_ts)
-            VALUES (?,?,?,?,?,1,1,CURRENT_TIMESTAMP)
-            """,
-            (
-                "prompt-review-weekly",
-                "Weekly prompt proposal from usage/failure stats",
-                "0 9 * * 1",
-                "prompt_review",
-                "{}",
-            ),
-        )
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO cron_jobs (name,description,cron_expr,skill_type,skill_args,enabled,alert_owner,updated_ts)
-            VALUES (?,?,?,?,?,1,1,CURRENT_TIMESTAMP)
-            """,
-            (
-                "checkup-monthly",
-                "Monthly environment/dependency check",
-                "0 10 1 * *",
-                "checkup",
-                "{}",
-            ),
-        )
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO cron_jobs (name,description,cron_expr,skill_type,skill_args,enabled,alert_owner,updated_ts)
-            VALUES (?,?,?,?,?,1,1,CURRENT_TIMESTAMP)
-            """,
-            (
-                "system-map-weekly",
-                "Weekly self-documentation refresh",
-                "30 9 * * 1",
-                "system_map_refresh",
-                "{}",
-            ),
-        )
+        ensure_default_cron_jobs(conn, os.getcwd())
 
 
 # =============================================================================
