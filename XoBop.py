@@ -72,7 +72,7 @@ from xobop.router import classify
 from xobop.shell_facade import get_shell_executor
 from xobop.output_guardrails import normalize_machine_kv_output
 from xobop.defaults import STOPWORDS, STRICT_PROMPT, NORMAL_PROMPT, default_global_policies
-from xobop.agent import run_agent_loop
+from xobop.agent import AgentDeps, run_agent_loop
 from xobop.simulation import TempDbManager, shell_golden_cases, shell_replay_cases, ReplayController, apply_artifact_to_temp_settings
 
 # =============================================================================
@@ -2426,6 +2426,21 @@ async def _run_agent(chat_id: int, query: str, force: bool = False) -> str:
 
     token = _AGENT_TURN_ID.set(f"{chat_id}-{uuid.uuid4().hex[:12]}")
     try:
+        deps = AgentDeps(
+            get_history=_get_history,
+            build_memory_block=_build_memory_block,
+            build_tools_from_db=_build_tools_from_db,
+            user_forced=_user_forced,
+            get_runtime_prompt=_get_runtime_prompt,
+            save_message=_save_message,
+            maybe_promote_memory=_maybe_promote_memory,
+            call_skill=_call_skill,
+            redact=_redact,
+            normalize_machine_kv_output=normalize_machine_kv_output,
+            fire_and_forget=_fire_and_forget,
+            set_last_openai_latency_ms=_set_last_latency,
+            temperature_for_mode=_temperature_for_mode,
+        )
         final_text = await run_agent_loop(
             chat_id=chat_id,
             query=query,
@@ -2438,20 +2453,8 @@ async def _run_agent(chat_id: int, query: str, force: bool = False) -> str:
             max_tool_rounds=MAX_TOOL_ROUNDS,
             history_max=MAX_HISTORY,
             history_trim_to=TRIM_TO,
-            get_history=_get_history,
-            build_memory_block=_build_memory_block,
-            build_tools_from_db=_build_tools_from_db,
-            user_forced=_user_forced,
-            get_runtime_prompt=_get_runtime_prompt,
-            save_message=_save_message,
-            maybe_promote_memory=_maybe_promote_memory,
-            call_skill=_call_skill,
-            redact=_redact,
-            normalize_machine_kv_output=normalize_machine_kv_output,
-            fire_and_forget=_fire_and_forget,
+            deps=deps,
             log=log,
-            set_last_openai_latency_ms=_set_last_latency,
-            temperature_for_mode=_temperature_for_mode,
         )
         return final_text
     finally:
