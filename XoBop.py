@@ -48,7 +48,6 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from bs4 import BeautifulSoup
 from croniter import croniter
-from dotenv import load_dotenv
 from openai import AsyncOpenAI, RateLimitError
 from telegram import Update
 from telegram.constants import ChatAction
@@ -62,6 +61,7 @@ from telegram.ext import (
 )
 
 from xobop.state import STATE
+from xobop.config import settings
 from xobop.capabilities_shell import exec_shell_command
 from xobop.db import db_session, sqlite_online_backup
 from xobop.handlers_runtime import process_media_message, process_text_message
@@ -87,37 +87,27 @@ logging.getLogger("telegram").setLevel(logging.WARNING)
 # Configuration
 # =============================================================================
 
-load_dotenv()
+TOKEN = settings.telegram_token
+OPENAI_KEY = settings.openai_api_key
+OWNER_ID = settings.owner_id
 
-
-def _require_env(key: str) -> str:
-    val = os.getenv(key)
-    if not val:
-        raise RuntimeError(f"Missing required env var: {key}")
-    return val
-
-
-TOKEN = _require_env("TELEGRAM_TOKEN")
-OPENAI_KEY = _require_env("OPENAI_API_KEY")
-OWNER_ID = int(_require_env("OWNER_ID"))
-
-MODEL = os.getenv("MODEL", "gpt-4.1-mini")
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
-DB_FILE = os.getenv("DB_FILE", "memory.db")
-DEFAULT_MODE = os.getenv("DEFAULT_MODE", "strict").strip().lower()
-PROJECT_ROOT = Path(os.getenv("PROJECT_ROOT", os.getcwd())).resolve()
-ARTIFACT_DIR = Path(os.getenv("ARTIFACT_DIR", str(PROJECT_ROOT / "artifacts"))).resolve()
-ALLOWED_WRITE_ROOT = Path(os.getenv("ALLOWED_WRITE_ROOT", str(PROJECT_ROOT))).resolve()
-ALLOW_RAW_SHELL = os.getenv("ALLOW_RAW_SHELL", "0").strip() == "1"
-USE_CAPABILITY_FACADE_SHELL = os.getenv("USE_CAPABILITY_FACADE_SHELL", "0").strip() == "1"
-USE_SHELL_REPLAY_CONTROLLER = os.getenv("USE_SHELL_REPLAY_CONTROLLER", "0").strip() == "1"
-PANIC_UNLOCK_CODE = os.getenv("PANIC_UNLOCK_CODE", "").strip()
-READ_ROOT = Path(os.getenv("READ_ROOT", str(ALLOWED_WRITE_ROOT))).resolve()
-EMBEDDING_FALLBACK = os.getenv("EMBEDDING_FALLBACK", "1").strip() == "1"
-FILE_MEMORY_ROOT = Path(os.getenv("FILE_MEMORY_ROOT", str(ALLOWED_WRITE_ROOT))).resolve()
-LONG_MEMORY_FILE = Path(os.getenv("LONG_MEMORY_FILE", str(FILE_MEMORY_ROOT / "MEMORY.md"))).resolve()
-DAILY_MEMORY_DIR = Path(os.getenv("DAILY_MEMORY_DIR", str(FILE_MEMORY_ROOT / "memory"))).resolve()
-SELF_MODS_FILE = Path(os.getenv("SELF_MODS_FILE", str(PROJECT_ROOT / "config" / "self_mods.json"))).resolve()
+MODEL = settings.model
+EMBEDDING_MODEL = settings.embedding_model
+DB_FILE = settings.db_file
+DEFAULT_MODE = settings.default_mode
+PROJECT_ROOT = settings.project_root
+ARTIFACT_DIR = settings.artifact_dir
+ALLOWED_WRITE_ROOT = settings.allowed_write_root
+ALLOW_RAW_SHELL = settings.allow_raw_shell
+USE_CAPABILITY_FACADE_SHELL = settings.use_capability_facade_shell
+USE_SHELL_REPLAY_CONTROLLER = settings.use_shell_replay_controller
+PANIC_UNLOCK_CODE = settings.panic_unlock_code
+READ_ROOT = settings.read_root
+EMBEDDING_FALLBACK = settings.embedding_fallback
+FILE_MEMORY_ROOT = settings.file_memory_root
+LONG_MEMORY_FILE = settings.long_memory_file
+DAILY_MEMORY_DIR = settings.daily_memory_dir
+SELF_MODS_FILE = settings.self_mods_file
 RUNTIME_SNAPSHOT_FILE = Path(os.getenv("RUNTIME_SNAPSHOT_FILE", str(PROJECT_ROOT / "state" / "runtime_settings_snapshot.json"))).resolve()
 DAILY_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -4975,7 +4965,7 @@ async def cmd_cronrm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     name = update.message.text.partition(" ")[2].strip()
     if not name:
-        await _reply(update, "Use: `/cronrm <n>`")
+        await _reply(update, "Use: `/cronrm <name>`")
         return
     result = _remove_cron_job(name)
     scheduler = ctx.bot_data.get("scheduler")
@@ -5000,7 +4990,7 @@ async def cmd_cronon(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     name = update.message.text.partition(" ")[2].strip()
     if not name:
-        await _reply(update, "Use: `/cronon <n>`")
+        await _reply(update, "Use: `/cronon <name>`")
         return
     result = _toggle_cron_job(name, True)
     scheduler = ctx.bot_data.get("scheduler")
@@ -5017,7 +5007,7 @@ async def cmd_cronoff(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     name = update.message.text.partition(" ")[2].strip()
     if not name:
-        await _reply(update, "Use: `/cronoff <n>`")
+        await _reply(update, "Use: `/cronoff <name>`")
         return
     result = _toggle_cron_job(name, False)
     scheduler = ctx.bot_data.get("scheduler")
@@ -5040,7 +5030,7 @@ async def cmd_cronruns(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await _reply(update, "Limit must be a number. Use: `/cronruns <name> [limit]`")
         return
     if not name:
-        await _reply(update, "Use: `/cronruns <n> [limit]`")
+        await _reply(update, "Use: `/cronruns <name> [limit]`")
         return
     await _reply(update, _get_cron_runs(name, limit))
 
@@ -5053,7 +5043,7 @@ async def cmd_cronrun(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     name = update.message.text.partition(" ")[2].strip()
     if not name:
-        await _reply(update, "Use: `/cronrun <n>`")
+        await _reply(update, "Use: `/cronrun <name>`")
         return
     with get_db() as conn:
         row = conn.execute("SELECT name FROM cron_jobs WHERE name=?", (name,)).fetchone()
