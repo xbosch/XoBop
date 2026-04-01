@@ -78,6 +78,7 @@ from xobop.runtime_ops import (
 )
 from xobop.attachments import extract_docx_text, extract_xlsx_text, summarize_zip
 from xobop.commands_core import build_attachdiag_text, build_state_check_text, build_status_text
+from xobop.commands_ops import parse_int_or_default
 from xobop.improve import (
     apply_artifact_to_runtime_settings as improve_apply_artifact_to_runtime_settings,
     artifact_contract as improve_artifact_contract,
@@ -4160,10 +4161,7 @@ async def cmd_op_sanity(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _owner_only(update):
         return
     raw = update.message.text.partition(" ")[2].strip()
-    try:
-        hours = int(raw) if raw else 24
-    except Exception:
-        hours = 24
+    hours = parse_int_or_default(raw, 24)
     await _reply(update, _op_sanity_report(hours))
 
 
@@ -4171,10 +4169,7 @@ async def cmd_diagnose(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _owner_only(update):
         return
     raw = update.message.text.partition(" ")[2].strip()
-    try:
-        days = int(raw) if raw else 7
-    except ValueError:
-        days = 7
+    days = parse_int_or_default(raw, 7)
     await _reply(update, _diagnose_report(days))
 
 
