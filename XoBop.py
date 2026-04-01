@@ -84,6 +84,7 @@ from xobop.runtime_state import (
     repair_from_snapshot as rs_repair_from_snapshot,
 )
 from xobop.mode_utils import mode_help_text as mu_mode_help_text, temperature_for_mode as mu_temperature_for_mode
+from xobop.ops_logging import record_op_event as ol_record_op_event, record_run as ol_record_run, update_skill_usage as ol_update_skill_usage
 from xobop.io_text import fetch_text_limited as io_fetch_text_limited, read_text_limited as io_read_text_limited
 from xobop.shell_policy import classify_shell as sp_classify_shell, user_forced as sp_user_forced
 from xobop.improve import (
@@ -905,20 +906,7 @@ def _enforce_rate_limit(bucket: str, limit: int, weight: int = 1) -> tuple[bool,
 
 
 def _update_skill_usage(skill_name: str, duration_ms: int, status: str) -> None:
-    err_inc = 0 if status == "ok" else 1
-    with get_db() as conn:
-        conn.execute(
-            """
-            INSERT INTO skill_usage_stats (skill_name,call_count,error_count,total_duration_ms,last_used_ts)
-            VALUES (?,?,?,?,CURRENT_TIMESTAMP)
-            ON CONFLICT(skill_name) DO UPDATE SET
-              call_count=skill_usage_stats.call_count + 1,
-              error_count=skill_usage_stats.error_count + ?,
-              total_duration_ms=skill_usage_stats.total_duration_ms + ?,
-              last_used_ts=CURRENT_TIMESTAMP
-            """,
-            (skill_name, 1, err_inc, duration_ms, err_inc, duration_ms),
-        )
+    return ol_update_skill_usage(get_db=get_db, skill_name=skill_name, duration_ms=duration_ms, status=status)
 
 
 # =============================================================================
@@ -1817,23 +1805,17 @@ def _record_op_event(
     retries: int = 0,
     metadata: Optional[dict] = None,
 ) -> None:
-    with get_db() as conn:
-        conn.execute(
-            """
-            INSERT INTO op_events (chat_id,event_type,route,command,status,latency_ms,retries,metadata_json)
-            VALUES (?,?,?,?,?,?,?,?)
-            """,
-            (
-                int(chat_id),
-                event_type,
-                route,
-                command,
-                status,
-                latency_ms,
-                int(retries),
-                json.dumps(metadata or {}),
-            ),
-        )
+    return ol_record_op_event(
+        get_db=get_db,
+        event_type=event_type,
+        chat_id=chat_id,
+        route=route,
+        command=command,
+        status=status,
+        latency_ms=latency_ms,
+        retries=retries,
+        metadata=metadata,
+    )
 
 
 def _record_run(
@@ -1848,27 +1830,22 @@ def _record_run(
     status: str,
     artifact_path: Optional[str] = None,
 ) -> None:
-    with get_db() as conn:
-        conn.execute(
-            """
-            INSERT INTO runs
-              (chat_id,turn_id,user_query,mode,tool_name,tool_args,result,exit_code,duration_ms,status,artifact_path)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?)
-            """,
-            (
-                chat_id,
-                _AGENT_TURN_ID.get("") or "",
-                _redact(user_query),
-                mode,
-                tool_name,
-                json.dumps(tool_args) if tool_args else None,
-                _redact(result[:TEXT_LIMIT]),
-                exit_code,
-                duration_ms,
-                status,
-                artifact_path,
-            ),
-        )
+    ol_record_run(
+        get_db=get_db,
+        redact=_redact,
+        text_limit=TEXT_LIMIT,
+        turn_id=_AGENT_TURN_ID.get("") or "",
+        chat_id=chat_id,
+        user_query=user_query,
+        mode=mode,
+        tool_name=tool_name,
+        tool_args=tool_args,
+        result=result,
+        exit_code=exit_code,
+        duration_ms=duration_ms,
+        status=status,
+        artifact_path=artifact_path,
+    )
     _record_op_event(
         "tool_run",
         chat_id=chat_id,
