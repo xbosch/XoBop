@@ -160,122 +160,45 @@ async def process_text_message(
         result = await call_skill(chat_id, text, mode_getter(), "run_shell", {"command": cmd})
         await reply(update, result)
         return True
-    if lower.startswith("/cronadd "):
-        await cmd_cronadd(update)
-        return True
-    if lower.startswith("/cronlist"):
-        await cmd_cronlist(update)
-        return True
-    if lower.startswith("/cronrun "):
-        await cmd_cronrun(update)
-        return True
-    if lower.startswith("/cronruns "):
-        await cmd_cronruns(update)
-        return True
-    if lower.startswith("/status"):
-        op_event("route_selected", chat_id=chat_id, route="cmd_status")
-        await cmd_status(update)
-        return True
-    if lower.startswith("/health"):
-        op_event("route_selected", chat_id=chat_id, route="cmd_health")
-        await cmd_health(update)
-        return True
-    if lower.startswith("/checkup"):
-        op_event("health_check", chat_id=chat_id, route="cmd_checkup")
-        await cmd_checkup(update)
-        return True
-    if lower.startswith("/state_check"):
-        op_event("route_selected", chat_id=chat_id, route="cmd_state_check")
-        await cmd_state_check(update)
-        return True
-    if lower.startswith("/state_repair"):
-        op_event("route_selected", chat_id=chat_id, route="cmd_state_repair")
-        await cmd_state_repair(update)
-        return True
-    if lower.startswith("/op_sanity"):
-        op_event("route_selected", chat_id=chat_id, route="cmd_op_sanity")
-        await cmd_op_sanity(update)
-        return True
-    if lower.startswith("/diagnose"):
-        op_event("route_selected", chat_id=chat_id, route="cmd_diagnose")
-        await cmd_diagnose(update)
-        return True
-    if lower.startswith("/improve_propose"):
-        op_event("route_selected", chat_id=chat_id, route="cmd_improve_propose")
-        await cmd_improve_propose(update)
-        return True
-    if lower.startswith("/improve_list"):
-        op_event("route_selected", chat_id=chat_id, route="cmd_improve_list")
-        await cmd_improve_list(update)
-        return True
-    if lower.startswith("/improve_compile"):
-        op_event("route_selected", chat_id=chat_id, route="cmd_improve_compile")
-        await cmd_improve_compile(update)
-        return True
-    if lower.startswith("/improve_artifacts"):
-        op_event("route_selected", chat_id=chat_id, route="cmd_improve_artifacts")
-        await cmd_improve_artifacts(update)
-        return True
-    if lower.startswith("/improve_simulate"):
-        op_event("route_selected", chat_id=chat_id, route="cmd_improve_simulate")
-        await cmd_improve_simulate(update)
-        return True
-    if lower.startswith("/improve_runs"):
-        op_event("route_selected", chat_id=chat_id, route="cmd_improve_runs")
-        await cmd_improve_runs(update)
-        return True
-    if lower.startswith("/improve_compare"):
-        op_event("route_selected", chat_id=chat_id, route="cmd_improve_compare")
-        await cmd_improve_compare(update)
-        return True
-    if lower.startswith("/improve_policy"):
-        op_event("route_selected", chat_id=chat_id, route="cmd_improve_policy")
-        await cmd_improve_policy(update)
-        return True
-    if lower.startswith("/improve_promote"):
-        op_event("route_selected", chat_id=chat_id, route="cmd_improve_promote")
-        await cmd_improve_promote(update)
-        return True
-    if lower.startswith("/improve_autopromote"):
-        op_event("route_selected", chat_id=chat_id, route="cmd_improve_autopromote")
-        await cmd_improve_autopromote(update)
-        return True
-    if lower.startswith("/improve_funnel"):
-        op_event("route_selected", chat_id=chat_id, route="cmd_improve_funnel")
-        await cmd_improve_funnel(update)
-        return True
-    if lower.startswith("/improve_eval_report"):
-        op_event("route_selected", chat_id=chat_id, route="cmd_improve_eval_report")
-        await cmd_improve_eval_report(update)
-        return True
-    if lower.startswith("/improve_weekly_report"):
-        op_event("route_selected", chat_id=chat_id, route="cmd_improve_weekly_report")
-        await cmd_improve_weekly_report(update)
-        return True
-    if lower.startswith("/improve_phase"):
-        op_event("route_selected", chat_id=chat_id, route="cmd_improve_phase")
-        await cmd_improve_phase(update)
-        return True
-    if lower.startswith("/improve_log_rollback"):
-        op_event("route_selected", chat_id=chat_id, route="cmd_improve_log_rollback")
-        await cmd_improve_log_rollback(update)
-        return True
-    if lower.startswith("/evolve_capture"):
-        op_event("route_selected", chat_id=chat_id, route="cmd_evolve_capture")
-        await cmd_evolve_capture(update)
-        return True
-    if lower.startswith("/evolve_memory"):
-        op_event("route_selected", chat_id=chat_id, route="cmd_evolve_memory")
-        await cmd_evolve_memory(update)
-        return True
-    if lower.startswith("/panicstatus"):
-        await cmd_panicstatus(update)
-        return True
-    if lower.startswith("/paniclock"):
-        await cmd_paniclock(update)
-        return True
-    if lower.startswith("/panicunlock"):
-        await cmd_panicunlock(update)
+    cmd_token = lower.split()[0] if lower.startswith("/") else ""
+    command_registry = {
+        "/cronadd": (cmd_cronadd, None, None),
+        "/cronlist": (cmd_cronlist, None, None),
+        "/cronrun": (cmd_cronrun, None, None),
+        "/cronruns": (cmd_cronruns, None, None),
+        "/status": (cmd_status, "route_selected", "cmd_status"),
+        "/health": (cmd_health, "route_selected", "cmd_health"),
+        "/checkup": (cmd_checkup, "health_check", "cmd_checkup"),
+        "/state_check": (cmd_state_check, "route_selected", "cmd_state_check"),
+        "/state_repair": (cmd_state_repair, "route_selected", "cmd_state_repair"),
+        "/op_sanity": (cmd_op_sanity, "route_selected", "cmd_op_sanity"),
+        "/diagnose": (cmd_diagnose, "route_selected", "cmd_diagnose"),
+        "/improve_propose": (cmd_improve_propose, "route_selected", "cmd_improve_propose"),
+        "/improve_list": (cmd_improve_list, "route_selected", "cmd_improve_list"),
+        "/improve_compile": (cmd_improve_compile, "route_selected", "cmd_improve_compile"),
+        "/improve_artifacts": (cmd_improve_artifacts, "route_selected", "cmd_improve_artifacts"),
+        "/improve_simulate": (cmd_improve_simulate, "route_selected", "cmd_improve_simulate"),
+        "/improve_runs": (cmd_improve_runs, "route_selected", "cmd_improve_runs"),
+        "/improve_compare": (cmd_improve_compare, "route_selected", "cmd_improve_compare"),
+        "/improve_policy": (cmd_improve_policy, "route_selected", "cmd_improve_policy"),
+        "/improve_promote": (cmd_improve_promote, "route_selected", "cmd_improve_promote"),
+        "/improve_autopromote": (cmd_improve_autopromote, "route_selected", "cmd_improve_autopromote"),
+        "/improve_funnel": (cmd_improve_funnel, "route_selected", "cmd_improve_funnel"),
+        "/improve_eval_report": (cmd_improve_eval_report, "route_selected", "cmd_improve_eval_report"),
+        "/improve_weekly_report": (cmd_improve_weekly_report, "route_selected", "cmd_improve_weekly_report"),
+        "/improve_phase": (cmd_improve_phase, "route_selected", "cmd_improve_phase"),
+        "/improve_log_rollback": (cmd_improve_log_rollback, "route_selected", "cmd_improve_log_rollback"),
+        "/evolve_capture": (cmd_evolve_capture, "route_selected", "cmd_evolve_capture"),
+        "/evolve_memory": (cmd_evolve_memory, "route_selected", "cmd_evolve_memory"),
+        "/panicstatus": (cmd_panicstatus, None, None),
+        "/paniclock": (cmd_paniclock, None, None),
+        "/panicunlock": (cmd_panicunlock, None, None),
+    }
+    if cmd_token in command_registry:
+        handler, event_name, route_name = command_registry[cmd_token]
+        if event_name and route_name:
+            op_event(event_name, chat_id=chat_id, route=route_name)
+        await handler(update)
         return True
     if text.startswith("/"):
         cmd = text.split()[0]
