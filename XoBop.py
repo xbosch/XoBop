@@ -156,14 +156,14 @@ _SECRET_RE = re.compile(
 FORCE_RE = re.compile(r"(^|\s)(force|/force|force:|forced)(\s|$)", re.IGNORECASE)
 
 DESTRUCTIVE_PATTERNS = [re.compile(p, re.IGNORECASE) for p in [
-    r"\brm\b", r"\bmv\b", r"\bchmod\b", r"\bchown\b",
+    r"\brm\b", r"\bmv\b", r"\bchown\b",
     r"\bpkill\b", r"\bkill\b", r"\bkillall\b", r"\bdd\b",
-    r"\bmkfs\b", r"\bmount\b", r"\bumount\b", r">\s*/",
+    r"\bmkfs\b", r"\bmount\b", r"\bumount\b",
     r"\btruncate\b", r"\bfind\b.*\b-delete\b",
 ]]
 WRITE_PATTERNS = [re.compile(p, re.IGNORECASE) for p in [
-    r"\becho\b.*>", r"\btee\b", r"\bcp\b", r"\bmkdir\b",
-    r"\btouch\b", r"\bsed\b.*-i", r"\bperl\b.*-i", r"\bpython\b.*\s-c\s",
+    r"\becho\b.*>", r"\bprintf\b.*>", r"\btee\b", r"\bcp\b", r"\bmkdir\b",
+    r"\btouch\b", r"\bchmod\b", r"\bsed\b.*-i", r"\bperl\b.*-i", r"\bpython\b.*\s-c\s",
 ]]
 READ_PATTERNS = [re.compile(p, re.IGNORECASE) for p in [
     r"\bls\b", r"\bcat\b", r"\bhead\b", r"\btail\b", r"\bgrep\b",
