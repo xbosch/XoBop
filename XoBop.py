@@ -25,7 +25,6 @@ import base64
 import contextvars
 import json
 import logging
-import math
 import mimetypes
 import os
 import re
@@ -35,7 +34,6 @@ import signal
 import sqlite3
 import time
 import uuid
-from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -79,6 +77,7 @@ from xobop.commands_ops import parse_int_or_default
 from xobop.text_math import cosine as tm_cosine, deterministic_hash as tm_hash, hours_since as tm_hours_since, recency_score as tm_recency_score, split_words as tm_split_words
 from xobop.policy_helpers import blocked_suffix as ph_blocked_suffix, domain_allowed as ph_domain_allowed, is_under_root as ph_is_under_root
 from xobop.artifacts_io import shorten_or_artifact as aio_shorten_or_artifact, store_artifact as aio_store_artifact
+from xobop.memory_math import fallback_embedding as mm_fallback_embedding
 from xobop.io_text import fetch_text_limited as io_fetch_text_limited, read_text_limited as io_read_text_limited
 from xobop.shell_policy import classify_shell as sp_classify_shell, user_forced as sp_user_forced
 from xobop.improve import (
@@ -882,16 +881,12 @@ def _deterministic_hash(token: str) -> int:
 
 def _fallback_embedding(text: str, dims: int = 256) -> list[float]:
     log.warning("Embedding API unavailable; using approximate fallback embedding. Semantic recall quality may degrade.")
-    vec = [0.0] * dims
-    counts = Counter(_split_words(text))
-    if not counts:
-        return vec
-    for tok, count in counts.items():
-        idx = _deterministic_hash(tok) % dims
-        sign = -1.0 if (_deterministic_hash(tok + "!") % 2) else 1.0
-        vec[idx] += sign * float(count)
-    norm = math.sqrt(sum(v * v for v in vec)) or 1.0
-    return [v / norm for v in vec]
+    return mm_fallback_embedding(
+        text,
+        dims=dims,
+        split_words=_split_words,
+        deterministic_hash=_deterministic_hash,
+    )
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
