@@ -80,6 +80,7 @@ from xobop.commands_core import build_attachdiag_text, build_state_check_text, b
 from xobop.commands_ops import parse_int_or_default
 from xobop.text_math import cosine as tm_cosine, deterministic_hash as tm_hash, hours_since as tm_hours_since, recency_score as tm_recency_score, split_words as tm_split_words
 from xobop.policy_helpers import blocked_suffix as ph_blocked_suffix, domain_allowed as ph_domain_allowed, is_under_root as ph_is_under_root
+from xobop.artifacts_io import shorten_or_artifact as aio_shorten_or_artifact, store_artifact as aio_store_artifact
 from xobop.improve import (
     apply_artifact_to_runtime_settings as improve_apply_artifact_to_runtime_settings,
     artifact_contract as improve_artifact_contract,
@@ -822,17 +823,25 @@ def _redact(text: str) -> str:
 
 
 def _store_artifact(prefix: str, content: str) -> Path:
-    path = ARTIFACT_DIR / f"{prefix}_{_utc_stamp()}_{uuid.uuid4().hex[:8]}.txt"
-    path.write_text(content, encoding="utf-8")
-    return path
+    return aio_store_artifact(
+        artifact_dir=ARTIFACT_DIR,
+        prefix=prefix,
+        content=content,
+        stamp_fn=_utc_stamp,
+        uuid_fn=uuid.uuid4,
+    )
 
 
 def _shorten_or_artifact(prefix: str, text: str) -> tuple[str, Optional[str]]:
-    if len(text) <= ARTIFACT_TEXT_THRESHOLD:
-        return text[:TEXT_LIMIT], None
-    artifact_path = _store_artifact(prefix, text)
-    summary = text[:1500] + f"\n[TRUNCATED — full output saved to {artifact_path}]"
-    return summary, str(artifact_path)
+    return aio_shorten_or_artifact(
+        artifact_dir=ARTIFACT_DIR,
+        prefix=prefix,
+        text=text,
+        artifact_text_threshold=ARTIFACT_TEXT_THRESHOLD,
+        text_limit=TEXT_LIMIT,
+        stamp_fn=_utc_stamp,
+        uuid_fn=uuid.uuid4,
+    )
 
 
 def _is_under_root(path: Path, root: Path) -> bool:
