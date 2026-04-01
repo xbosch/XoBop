@@ -52,13 +52,7 @@ from openai import AsyncOpenAI, RateLimitError
 from telegram import Update
 from telegram.constants import ChatAction
 from telegram.error import TelegramError
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
-)
+from telegram.ext import ContextTypes
 
 from xobop.state import STATE
 from xobop.config import settings
@@ -66,6 +60,7 @@ from xobop.capabilities_shell import exec_shell_command
 from xobop.db import db_session, sqlite_online_backup
 from xobop.migrations import apply_migrations
 from xobop.handlers_runtime import process_media_message, process_text_message
+from xobop.bootstrap import build_app, register_handlers
 from xobop.router import classify
 from xobop.shell_facade import get_shell_executor
 from xobop.simulation import TempDbManager, shell_golden_cases, shell_replay_cases, ReplayController, apply_artifact_to_temp_settings
@@ -5394,79 +5389,77 @@ def main() -> None:
         ALLOWED_WRITE_ROOT,
     )
 
-    app = (
-        Application.builder()
-        .token(TOKEN)
-        .post_init(_post_init)
-        .post_shutdown(_post_shutdown)
-        .build()
+    app = build_app(token=TOKEN, post_init=_post_init, post_shutdown=_post_shutdown)
+    register_handlers(
+        app=app,
+        commands={
+            "remember": cmd_remember,
+            "delfact": cmd_delfact,
+            "facts": cmd_facts,
+            "memories": cmd_memories,
+            "memadd": cmd_memadd,
+            "memdel": cmd_memdel,
+            "addtask": cmd_addtask,
+            "donetask": cmd_donetask,
+            "tasks": cmd_tasks,
+            "mode": cmd_mode,
+            "promptshow": cmd_promptshow,
+            "promptset": cmd_promptset,
+            "promptproposal": cmd_promptproposal,
+            "promptapprove": cmd_promptapprove,
+            "promptreject": cmd_promptreject,
+            "quiethours": cmd_quiethours,
+            "quietoff": cmd_quietoff,
+            "quietflush": cmd_quietflush,
+            "status": cmd_status,
+            "health": cmd_health,
+            "checkup": cmd_checkup,
+            "state_check": cmd_state_check,
+            "state_repair": cmd_state_repair,
+            "op_sanity": cmd_op_sanity,
+            "diagnose": cmd_diagnose,
+            "improve_propose": cmd_improve_propose,
+            "improve_list": cmd_improve_list,
+            "improve_compile": cmd_improve_compile,
+            "improve_artifacts": cmd_improve_artifacts,
+            "improve_simulate": cmd_improve_simulate,
+            "improve_runs": cmd_improve_runs,
+            "improve_compare": cmd_improve_compare,
+            "improve_policy": cmd_improve_policy,
+            "improve_promote": cmd_improve_promote,
+            "improve_autopromote": cmd_improve_autopromote,
+            "improve_funnel": cmd_improve_funnel,
+            "improve_eval_report": cmd_improve_eval_report,
+            "improve_weekly_report": cmd_improve_weekly_report,
+            "improve_phase": cmd_improve_phase,
+            "improve_log_rollback": cmd_improve_log_rollback,
+            "evolve_capture": cmd_evolve_capture,
+            "evolve_memory": cmd_evolve_memory,
+            "plan": cmd_plan,
+            "go": cmd_go,
+            "topskills": cmd_topskills,
+            "exec": cmd_exec,
+            "panicstatus": cmd_panicstatus,
+            "paniclock": cmd_paniclock,
+            "panicunlock": cmd_panicunlock,
+            "skills": cmd_skills,
+            "skillon": cmd_skillon,
+            "skilloff": cmd_skilloff,
+            "clearctx": cmd_clearctx,
+            "help": cmd_help,
+            "cronadd": cmd_cronadd,
+            "cronrm": cmd_cronrm,
+            "cronlist": cmd_cronlist,
+            "cronon": cmd_cronon,
+            "cronoff": cmd_cronoff,
+            "cronrun": cmd_cronrun,
+            "cronruns": cmd_cronruns,
+        },
+        cmd_unknown=cmd_unknown,
+        handle_media_message=handle_media_message,
+        handle_message=handle_message,
+        on_error=_on_error,
     )
-
-    app.add_handler(CommandHandler("remember", cmd_remember))
-    app.add_handler(CommandHandler("delfact", cmd_delfact))
-    app.add_handler(CommandHandler("facts", cmd_facts))
-    app.add_handler(CommandHandler("memories", cmd_memories))
-    app.add_handler(CommandHandler("memadd", cmd_memadd))
-    app.add_handler(CommandHandler("memdel", cmd_memdel))
-    app.add_handler(CommandHandler("addtask", cmd_addtask))
-    app.add_handler(CommandHandler("donetask", cmd_donetask))
-    app.add_handler(CommandHandler("tasks", cmd_tasks))
-    app.add_handler(CommandHandler("mode", cmd_mode))
-    app.add_handler(CommandHandler("promptshow", cmd_promptshow))
-    app.add_handler(CommandHandler("promptset", cmd_promptset))
-    app.add_handler(CommandHandler("promptproposal", cmd_promptproposal))
-    app.add_handler(CommandHandler("promptapprove", cmd_promptapprove))
-    app.add_handler(CommandHandler("promptreject", cmd_promptreject))
-    app.add_handler(CommandHandler("quiethours", cmd_quiethours))
-    app.add_handler(CommandHandler("quietoff", cmd_quietoff))
-    app.add_handler(CommandHandler("quietflush", cmd_quietflush))
-    app.add_handler(CommandHandler("status", cmd_status))
-    app.add_handler(CommandHandler("health", cmd_health))
-    app.add_handler(CommandHandler("checkup", cmd_checkup))
-    app.add_handler(CommandHandler("state_check", cmd_state_check))
-    app.add_handler(CommandHandler("state_repair", cmd_state_repair))
-    app.add_handler(CommandHandler("op_sanity", cmd_op_sanity))
-    app.add_handler(CommandHandler("diagnose", cmd_diagnose))
-    app.add_handler(CommandHandler("improve_propose", cmd_improve_propose))
-    app.add_handler(CommandHandler("improve_list", cmd_improve_list))
-    app.add_handler(CommandHandler("improve_compile", cmd_improve_compile))
-    app.add_handler(CommandHandler("improve_artifacts", cmd_improve_artifacts))
-    app.add_handler(CommandHandler("improve_simulate", cmd_improve_simulate))
-    app.add_handler(CommandHandler("improve_runs", cmd_improve_runs))
-    app.add_handler(CommandHandler("improve_compare", cmd_improve_compare))
-    app.add_handler(CommandHandler("improve_policy", cmd_improve_policy))
-    app.add_handler(CommandHandler("improve_promote", cmd_improve_promote))
-    app.add_handler(CommandHandler("improve_autopromote", cmd_improve_autopromote))
-    app.add_handler(CommandHandler("improve_funnel", cmd_improve_funnel))
-    app.add_handler(CommandHandler("improve_eval_report", cmd_improve_eval_report))
-    app.add_handler(CommandHandler("improve_weekly_report", cmd_improve_weekly_report))
-    app.add_handler(CommandHandler("improve_phase", cmd_improve_phase))
-    app.add_handler(CommandHandler("improve_log_rollback", cmd_improve_log_rollback))
-    app.add_handler(CommandHandler("evolve_capture", cmd_evolve_capture))
-    app.add_handler(CommandHandler("evolve_memory", cmd_evolve_memory))
-    app.add_handler(CommandHandler("plan", cmd_plan))
-    app.add_handler(CommandHandler("go", cmd_go))
-    app.add_handler(CommandHandler("topskills", cmd_topskills))
-    app.add_handler(CommandHandler("exec", cmd_exec))
-    app.add_handler(CommandHandler("panicstatus", cmd_panicstatus))
-    app.add_handler(CommandHandler("paniclock", cmd_paniclock))
-    app.add_handler(CommandHandler("panicunlock", cmd_panicunlock))
-    app.add_handler(CommandHandler("skills", cmd_skills))
-    app.add_handler(CommandHandler("skillon", cmd_skillon))
-    app.add_handler(CommandHandler("skilloff", cmd_skilloff))
-    app.add_handler(CommandHandler("clearctx", cmd_clearctx))
-    app.add_handler(CommandHandler("help", cmd_help))
-    app.add_handler(CommandHandler("cronadd", cmd_cronadd))
-    app.add_handler(CommandHandler("cronrm", cmd_cronrm))
-    app.add_handler(CommandHandler("cronlist", cmd_cronlist))
-    app.add_handler(CommandHandler("cronon", cmd_cronon))
-    app.add_handler(CommandHandler("cronoff", cmd_cronoff))
-    app.add_handler(CommandHandler("cronrun", cmd_cronrun))
-    app.add_handler(CommandHandler("cronruns", cmd_cronruns))
-    app.add_handler(MessageHandler(filters.COMMAND, cmd_unknown))
-    app.add_handler(MessageHandler((filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, handle_media_message))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_error_handler(_on_error)
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
