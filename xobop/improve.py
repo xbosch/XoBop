@@ -26,6 +26,12 @@ def artifact_contract(artifact_type: str, target: str) -> dict[str, Any]:
             "apply_points": ["runtime_settings", "snapshot_export", "startup_reconcile", "state_check"],
             "invariants": ["snapshot_lineage_nonzero"],
         }
+    elif at == "prompt_change" and tg == "runtime_prompt":
+        base = {
+            "family": "prompt",
+            "apply_points": ["runtime_prompt_store", "prompt_replay_gate"],
+            "invariants": ["prompt_nonempty", "prompt_golden_replay_pass"],
+        }
     else:
         return {"family": "unknown", "apply_points": [], "invariants": [], "contract_version": "v0", "contract_hash": ""}
 
@@ -71,6 +77,7 @@ def apply_artifact_to_runtime_settings(
     set_command_aliases: Callable[[dict[str, str]], None],
     set_exec_retry_limit: Callable[[int], None],
     set_last_applied_artifact_id: Callable[[int], None],
+    set_runtime_prompt: Callable[[str, str], None] | None = None,
 ) -> str:
     atype = (artifact_type or "").strip()
     t = (target or "").strip()
@@ -94,5 +101,15 @@ def apply_artifact_to_runtime_settings(
         aid = int((artifact_json or {}).get("artifact_id", 0) or 0)
         set_last_applied_artifact_id(aid)
         return f"last_applied_artifact_id={aid}"
+
+    if atype == "prompt_change" and t == "runtime_prompt":
+        mode = str((artifact_json or {}).get("mode", "")).strip().lower()
+        value = str((artifact_json or {}).get("value", ""))
+        if mode not in {"strict", "normal", "overseer"} or not value.strip():
+            raise ValueError("invalid prompt payload")
+        if set_runtime_prompt is None:
+            raise ValueError("runtime prompt setter unavailable")
+        set_runtime_prompt(mode, value)
+        return f"prompt[{mode}]={len(value)} chars"
 
     raise ValueError(f"unsupported artifact scope: {atype}:{t}")

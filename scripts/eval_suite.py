@@ -92,6 +92,20 @@ def test_artifact_contract_alias_scope() -> None:
     assert_true(ok, f"alias artifact contract failed: {note}")
 
 
+def test_artifact_contract_prompt_scope() -> None:
+    c = xb._artifact_contract("prompt_change", "runtime_prompt")
+    art = {
+        "mode": "strict",
+        "value": "You are safe and tool-aware.",
+        "apply_points": c["apply_points"],
+        "invariants": c["invariants"],
+        "contract_version": c["contract_version"],
+        "contract_hash": c["contract_hash"],
+    }
+    ok, note = xb._artifact_has_expected_contract("prompt_change", "runtime_prompt", art)
+    assert_true(ok, f"prompt artifact contract failed: {note}")
+
+
 def test_snapshot_lineage_last_applied_artifact_id() -> None:
     store: dict[str, str] = {}
     original_get = xb._get_setting
@@ -268,6 +282,7 @@ def main() -> int:
     r.run("alias.rewrite.basic", test_alias_rewrite_basic)
     r.run("alias.rewrite.args", test_alias_rewrite_with_args)
     r.run("artifact.contract.alias_scope", test_artifact_contract_alias_scope)
+    r.run("artifact.contract.prompt_scope", test_artifact_contract_prompt_scope)
     r.run("snapshot.lineage.last_applied_artifact_id", test_snapshot_lineage_last_applied_artifact_id)
     r.run("shell.hard_block", lambda: asyncio.run(test_shell_hard_block(r)))
     r.run("shell.force_gate", lambda: asyncio.run(test_shell_force_gate(r)))

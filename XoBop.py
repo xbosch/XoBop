@@ -490,7 +490,7 @@ def _get_eval_phase() -> str:
 
 
 def _allowed_artifact_families() -> set[str]:
-    raw = (_get_setting("artifact_families_allowed", "alias,retry,lineage") or "alias,retry,lineage").strip().lower()
+    raw = (_get_setting("artifact_families_allowed", "alias,retry,lineage,prompt") or "alias,retry,lineage,prompt").strip().lower()
     parts = [x.strip() for x in raw.split(",") if x.strip()]
     return set(parts or ["alias", "retry"])
 
@@ -512,6 +512,7 @@ def _apply_artifact_to_runtime_settings(artifact_type: str, target: str, artifac
         set_command_aliases=_set_command_aliases,
         set_exec_retry_limit=_set_exec_retry_limit,
         set_last_applied_artifact_id=_set_last_applied_artifact_id,
+        set_runtime_prompt=_set_runtime_prompt,
     )
 
 
@@ -2549,6 +2550,15 @@ def _compile_proposal_to_change(proposal_id: int) -> str:
             artifact = {"artifact_id": int(_get_last_applied_artifact_id() or 0)}
             expected_metric = "state_consistency"
             expected_delta = 0.0
+        elif "prompt" in text:
+            artifact_type = "prompt_change"
+            target = "runtime_prompt"
+            mode = _get_mode()
+            cur_prompt = _get_runtime_prompt(mode)
+            addon = "\n\n[Improvement candidate]\n- Keep responses concise, factual, and tool-aware."
+            artifact = {"mode": mode, "value": (cur_prompt + addon)[:12000]}
+            expected_metric = "golden_trace_pass_rate"
+            expected_delta = 0.0
         else:
             return f"⛔ Proposal #{proposal_id} is non-actionable: cannot compile to allowed artifact type."
 
@@ -2670,6 +2680,12 @@ def _simulate_proposal_sync(proposal_id: int) -> str:
             art_ok = str(aid).isdigit() and int(aid) >= 0
             if not art_ok:
                 art_note = "invalid lineage artifact"
+        elif atype == "prompt_change" and target == "runtime_prompt":
+            mode = str((ajson or {}).get("mode", "")).strip().lower()
+            val = str((ajson or {}).get("value", ""))
+            art_ok = mode in {"strict", "normal", "overseer"} and len(val.strip()) >= 40
+            if not art_ok:
+                art_note = "invalid prompt artifact"
         else:
             art_ok = False
             art_note = f"unsupported artifact scope: {atype}:{target}"
@@ -2730,6 +2746,27 @@ def _simulate_proposal_sync(proposal_id: int) -> str:
         replay_ok = False
         replay_note = str(exc)[:300]
     checks.append(("replay_regression", replay_ok, replay_note))
+
+    # 4) prompt golden replay gate for prompt artifacts
+    if (art["artifact_type"] or "") == "prompt_change" and (art["target"] or "") == "runtime_prompt":
+        prompt_ok = True
+        prompt_note = "ok"
+        try:
+            pj = json.loads(art["artifact_json"] or "{}")
+            ptxt = str((pj or {}).get("value", ""))
+            golden_prompt_checks = [
+                ("contains safety", "safety" in ptxt.lower() or "safe" in ptxt.lower()),
+                ("contains tool guidance", "tool" in ptxt.lower()),
+                ("non-empty", len(ptxt.strip()) >= 40),
+            ]
+            bad = [name for name, ok in golden_prompt_checks if not ok]
+            if bad:
+                prompt_ok = False
+                prompt_note = "missing: " + ", ".join(bad)
+        except Exception as exc:
+            prompt_ok = False
+            prompt_note = str(exc)[:300]
+        checks.append(("prompt_golden_replay", prompt_ok, prompt_note))
 
     shell_replay_report = None
     if USE_SHELL_REPLAY_CONTROLLER:
@@ -3054,6 +3091,9 @@ def _promote_proposal_sync(proposal_id: int, force: bool = False, reason: str = 
         return "⛔ High-risk proposal requires explicit force approval."
     if risk == "medium" and policy in {"manual", "assisted"} and not force:
         return "⛔ Medium-risk proposal requires force under current policy."
+
+    if art["artifact_type"] == "prompt_change" and art["target"] == "runtime_prompt" and not force:
+        return "⛔ Prompt artifacts require force approval due to global behavior blast radius."
 
     if imp == "error" and not force:
         return "⛔ Impact comparison indicates regression. Use force only with explicit acceptance."
@@ -4194,15 +4234,29 @@ async def cmd_improve_compare(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
 async def cmd_improve_policy(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _owner_only(update):
         return
-    raw = update.message.text.partition(" ")[2].strip().lower()
+    raw = update.message.text.partition(" ")[2].strip()
     if not raw:
-        await _reply(update, f"improve_policy: {_get_improve_policy()}\nUse: `/improve_policy <manual|assisted|auto_low>`")
+        fam = _get_setting("artifact_families_allowed", "alias,retry,lineage,prompt") or "alias,retry,lineage,prompt"
+        await _reply(update, f"improve_policy: {_get_improve_policy()}\nartifact_families_allowed: {fam}\nUse: `/improve_policy <manual|assisted|auto_low>` or `/improve_policy artifact_families_allowed <csv>`")
         return
-    if raw not in {"manual", "assisted", "auto_low"}:
-        await _reply(update, "Use: `/improve_policy <manual|assisted|auto_low>`")
+
+    parts = raw.split(maxsplit=1)
+    key = parts[0].strip().lower()
+    if key == "artifact_families_allowed":
+        if len(parts) < 2 or not parts[1].strip():
+            await _reply(update, "Use: `/improve_policy artifact_families_allowed alias,retry,lineage,prompt`")
+            return
+        val = ",".join([x.strip().lower() for x in parts[1].split(",") if x.strip()])
+        _set_setting("artifact_families_allowed", val)
+        await _reply(update, f"✅ artifact_families_allowed set to: {val}")
         return
-    _set_setting("improve_policy", raw)
-    await _reply(update, f"✅ improve_policy set to: {raw}")
+
+    pol = raw.strip().lower()
+    if pol not in {"manual", "assisted", "auto_low"}:
+        await _reply(update, "Use: `/improve_policy <manual|assisted|auto_low>` or `/improve_policy artifact_families_allowed <csv>`")
+        return
+    _set_setting("improve_policy", pol)
+    await _reply(update, f"✅ improve_policy set to: {pol}")
 
 
 async def cmd_improve_promote(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
