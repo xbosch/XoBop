@@ -23,7 +23,6 @@ This version remains single user by design.
 import asyncio
 import base64
 import contextvars
-import hashlib
 import json
 import logging
 import math
@@ -74,6 +73,11 @@ from xobop.output_guardrails import normalize_machine_kv_output
 from xobop.defaults import STOPWORDS, STRICT_PROMPT, NORMAL_PROMPT, default_global_policies
 from xobop.agent import AgentDeps, run_agent_loop
 from xobop.simulation import TempDbManager, shell_golden_cases, shell_replay_cases, ReplayController, apply_artifact_to_temp_settings
+from xobop.improve import (
+    apply_artifact_to_runtime_settings as improve_apply_artifact_to_runtime_settings,
+    artifact_contract as improve_artifact_contract,
+    artifact_has_expected_contract as improve_artifact_has_expected_contract,
+)
 
 # =============================================================================
 # Logging
@@ -501,80 +505,23 @@ def _allowed_artifact_families() -> set[str]:
 
 
 def _artifact_contract(artifact_type: str, target: str) -> dict[str, Any]:
-    at = (artifact_type or "").strip()
-    tg = (target or "").strip()
-    if at == "routing_rule" and tg == "unknown_command_handler":
-        base = {
-            "family": "alias",
-            "apply_points": ["command_pre_dispatch", "unknown_command_suggestion"],
-            "invariants": ["alias_applies_before_dispatch"],
-        }
-    elif at == "config_change" and tg == "runtime_retry_policy":
-        base = {
-            "family": "retry",
-            "apply_points": ["runtime_settings"],
-            "invariants": ["retry_limit_in_range"],
-        }
-    elif at == "state_lineage" and tg == "runtime_snapshot":
-        base = {
-            "family": "lineage",
-            "apply_points": ["runtime_settings", "snapshot_export", "startup_reconcile", "state_check"],
-            "invariants": ["snapshot_lineage_nonzero"],
-        }
-    else:
-        return {"family": "unknown", "apply_points": [], "invariants": [], "contract_version": "v0", "contract_hash": ""}
-
-    canonical = json.dumps({
-        "family": base["family"],
-        "apply_points": base["apply_points"],
-        "invariants": base["invariants"],
-        "contract_version": "v1",
-    }, sort_keys=True)
-    base["contract_version"] = "v1"
-    base["contract_hash"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
-    return base
+    return improve_artifact_contract(artifact_type, target)
 
 
 def _artifact_has_expected_contract(artifact_type: str, target: str, artifact_json: dict[str, Any]) -> tuple[bool, str]:
-    expected = _artifact_contract(artifact_type, target)
-    if expected.get("family") == "unknown":
-        return False, f"unsupported artifact scope: {artifact_type}:{target}"
-    allowed_contract_keys = {"apply_points", "invariants", "contract_version", "contract_hash"}
-    extra_contract_keys = [k for k in artifact_json.keys() if str(k).startswith("contract_") and str(k) not in allowed_contract_keys]
-    if extra_contract_keys:
-        return False, f"unknown contract keys: {','.join(sorted(extra_contract_keys))}"
-    if artifact_json.get("apply_points") != expected.get("apply_points"):
-        return False, "apply_points mismatch"
-    if artifact_json.get("invariants") != expected.get("invariants"):
-        return False, "invariants mismatch"
-    if str(artifact_json.get("contract_version", "")) != str(expected.get("contract_version", "")):
-        return False, "contract_version mismatch"
-    if str(artifact_json.get("contract_hash", "")) != str(expected.get("contract_hash", "")):
-        return False, "contract_hash mismatch"
-    return True, "ok"
+    return improve_artifact_has_expected_contract(artifact_type, target, artifact_json)
 
 
 def _apply_artifact_to_runtime_settings(artifact_type: str, target: str, artifact_json: dict[str, Any]) -> str:
-    atype = (artifact_type or "").strip()
-    t = (target or "").strip()
-    if atype == "routing_rule" and t == "unknown_command_handler":
-        aliases = dict(_get_command_aliases())
-        for k, v in dict((artifact_json or {}).get("add_alias", {})).items():
-            aliases[str(k).strip().lower()] = str(v).strip().lower()
-        _set_command_aliases(aliases)
-        return f"aliases={len(aliases)}"
-    if atype == "config_change" and t == "runtime_retry_policy":
-        key = str((artifact_json or {}).get("key", "")).strip()
-        val = str((artifact_json or {}).get("value", "")).strip()
-        if key != "exec_retry_limit" or (not val.isdigit()):
-            raise ValueError("invalid retry policy payload")
-        _set_exec_retry_limit(int(val))
-        return f"{key}={val}"
-    if atype == "state_lineage" and t == "runtime_snapshot":
-        aid = int((artifact_json or {}).get("artifact_id", 0) or 0)
-        _set_last_applied_artifact_id(aid)
-        return f"last_applied_artifact_id={aid}"
-    raise ValueError(f"unsupported artifact scope: {atype}:{t}")
+    return improve_apply_artifact_to_runtime_settings(
+        artifact_type,
+        target,
+        artifact_json,
+        get_command_aliases=_get_command_aliases,
+        set_command_aliases=_set_command_aliases,
+        set_exec_retry_limit=_set_exec_retry_limit,
+        set_last_applied_artifact_id=_set_last_applied_artifact_id,
+    )
 
 
 def _get_exec_retry_limit() -> int:
