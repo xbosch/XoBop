@@ -23,7 +23,7 @@ def register_handlers(*, app: Application, commands: dict[str, object], cmd_unkn
         "improve_artifacts", "improve_simulate", "improve_runs", "improve_compare",
         "improve_policy", "improve_promote", "improve_autopromote", "improve_funnel",
         "improve_eval_report", "improve_weekly_report", "improve_phase", "improve_log_rollback",
-        "evolve_capture", "evolve_memory", "plan", "go", "topskills", "exec",
+        "evolve_capture", "evolve_memory", "plan", "go", "topskills", "exec", "attachdiag",
         "panicstatus", "paniclock", "panicunlock", "skills", "skillon", "skilloff",
         "clearctx", "help", "cronadd", "cronrm", "cronlist", "cronon", "cronoff",
         "cronrun", "cronruns",

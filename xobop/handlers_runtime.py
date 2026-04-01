@@ -143,7 +143,7 @@ async def process_text_message(
         attachment_context = ""
         if callable(analyze_attachment):
             try:
-                attachment_context = (await analyze_attachment(attachment_path, text)) or ""
+                attachment_context = (await analyze_attachment(chat_id, attachment_path, text)) or ""
             except Exception:
                 attachment_context = ""
         if attachment_context:

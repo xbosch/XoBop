@@ -2317,18 +2317,27 @@ def _summarize_zip(path: Path, max_entries: int = 40) -> str:
         return "\n".join(lines) + more
 
 
-async def _analyze_attachment(path: str, user_hint: str = "") -> str:
+async def _analyze_attachment(chat_id: int, path: str, user_hint: str = "") -> str:
     p = Path(path).expanduser().resolve()
     if not p.exists():
+        STATE.last_attachment_diag_by_chat[int(chat_id)] = {"path": str(p), "status": "missing", "extractor": "none"}
         return ""
     size = p.stat().st_size
     suffix = p.suffix.lower()
     mime = mimetypes.guess_type(str(p))[0] or "application/octet-stream"
+    diag: dict[str, Any] = {"path": str(p), "mime": mime, "size": int(size), "extractor": "metadata", "status": "ok"}
+
+    def _ret(msg: str, *, extractor: str, status: str = "ok") -> str:
+        diag["extractor"] = extractor
+        diag["status"] = status
+        diag["preview_chars"] = len(msg or "")
+        STATE.last_attachment_diag_by_chat[int(chat_id)] = dict(diag)
+        return msg
 
     # Image understanding via multimodal model
     if mime.startswith("image/"):
         if size > 8 * 1024 * 1024:
-            return f"Attachment is image ({mime}, {size} bytes). Too large for inline analysis; use path directly."
+            return _ret(f"Attachment is image ({mime}, {size} bytes). Too large for inline analysis; use path directly.", extractor="image_metadata", status="degraded")
         b64 = base64.b64encode(p.read_bytes()).decode("ascii")
         prompt = (
             "Analyze this uploaded image for task execution. "
@@ -2353,9 +2362,9 @@ async def _analyze_attachment(path: str, user_hint: str = "") -> str:
                 temperature=0.0,
                 max_tokens=700,
             )
-            return (resp.choices[0].message.content or "").strip()
+            return _ret((resp.choices[0].message.content or "").strip(), extractor="image_vision")
         except Exception as exc:
-            return f"Attachment is image ({mime}, {size} bytes). Vision analysis unavailable: {str(exc)[:120]}"
+            return _ret(f"Attachment is image ({mime}, {size} bytes). Vision analysis unavailable: {str(exc)[:120]}", extractor="image_vision", status="degraded")
 
     # Text-like files: inline snippet
     text_like = {".txt", ".md", ".json", ".yaml", ".yml", ".csv", ".log", ".ini", ".toml", ".xml", ".html", ".py", ".js", ".ts", ".sh"}
@@ -2363,8 +2372,8 @@ async def _analyze_attachment(path: str, user_hint: str = "") -> str:
         raw = p.read_bytes()[:120000]
         decoded = raw.decode("utf-8", errors="ignore").strip()
         if decoded:
-            return f"Attachment text preview ({mime}, {size} bytes):\n{decoded[:2500]}"
-        return f"Attachment metadata: mime={mime}, size={size} bytes; no decodable UTF-8 text preview."
+            return _ret(f"Attachment text preview ({mime}, {size} bytes):\n{decoded[:2500]}", extractor="text_preview")
+        return _ret(f"Attachment metadata: mime={mime}, size={size} bytes; no decodable UTF-8 text preview.", extractor="text_metadata", status="degraded")
 
     # PDF best-effort extraction
     if suffix == ".pdf" or mime == "application/pdf":
@@ -2379,40 +2388,40 @@ async def _analyze_attachment(path: str, user_hint: str = "") -> str:
                     chunks.append(t)
             text = "\n\n".join(chunks).strip()
             if text:
-                return f"PDF text extract ({size} bytes):\n{text[:3000]}"
+                return _ret(f"PDF text extract ({size} bytes):\n{text[:3000]}", extractor="pdf_text")
         except Exception:
             pass
-        return f"Attachment is PDF ({size} bytes). Text extraction unavailable in current runtime; use conversion/OCR pipeline."
+        return _ret(f"Attachment is PDF ({size} bytes). Text extraction unavailable in current runtime; use conversion/OCR pipeline.", extractor="pdf_metadata", status="degraded")
 
     # DOCX extraction (OOXML zip)
     if suffix == ".docx" or mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
         try:
             text = _extract_docx_text(p, max_chars=3500)
             if text:
-                return f"DOCX text extract ({size} bytes):\n{text}"
-            return f"DOCX detected ({size} bytes) but no readable text found."
+                return _ret(f"DOCX text extract ({size} bytes):\n{text}", extractor="docx_text")
+            return _ret(f"DOCX detected ({size} bytes) but no readable text found.", extractor="docx_metadata", status="degraded")
         except Exception as exc:
-            return f"DOCX extraction failed: {str(exc)[:120]}"
+            return _ret(f"DOCX extraction failed: {str(exc)[:120]}", extractor="docx_error", status="error")
 
     # XLSX extraction (rows/cells preview)
     if suffix in {".xlsx", ".xlsc"} or mime == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
         try:
             text = _extract_xlsx_text(p, max_chars=3500)
             if text:
-                return f"XLSX table preview ({size} bytes):\n{text}"
-            return f"XLSX detected ({size} bytes) but no readable cells found."
+                return _ret(f"XLSX table preview ({size} bytes):\n{text}", extractor="xlsx_text")
+            return _ret(f"XLSX detected ({size} bytes) but no readable cells found.", extractor="xlsx_metadata", status="degraded")
         except Exception as exc:
-            return f"XLSX extraction failed: {str(exc)[:120]}"
+            return _ret(f"XLSX extraction failed: {str(exc)[:120]}", extractor="xlsx_error", status="error")
 
     # Generic ZIP archive summary
     if suffix == ".zip" or mime == "application/zip":
         try:
             listing = _summarize_zip(p)
-            return f"ZIP archive listing ({size} bytes):\n{listing}"
+            return _ret(f"ZIP archive listing ({size} bytes):\n{listing}", extractor="zip_listing")
         except Exception as exc:
-            return f"ZIP analysis failed: {str(exc)[:120]}"
+            return _ret(f"ZIP analysis failed: {str(exc)[:120]}", extractor="zip_error", status="error")
 
-    return f"Attachment metadata: name={p.name}, mime={mime}, size={size} bytes. Binary/non-text document; direct content extraction may require converter/OCR."
+    return _ret(f"Attachment metadata: name={p.name}, mime={mime}, size={size} bytes. Binary/non-text document; direct content extraction may require converter/OCR.", extractor="binary_metadata", status="degraded")
 
 
 async def _run_agent(chat_id: int, query: str, force: bool = False) -> str:
@@ -4281,6 +4290,29 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def cmd_attachdiag(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _owner_only(update):
+        return
+    chat_id = update.effective_chat.id
+    path = STATE.last_attachment_by_chat.get(chat_id)
+    diag = STATE.last_attachment_diag_by_chat.get(chat_id, {})
+    if not path:
+        await _reply(update, "No recent attachment in this chat.")
+        return
+    await _reply(
+        update,
+        (
+            f"Attachment diag\n"
+            f"• path: {path}\n"
+            f"• extractor: {diag.get('extractor', 'n/a')}\n"
+            f"• status: {diag.get('status', 'n/a')}\n"
+            f"• mime: {diag.get('mime', 'n/a')}\n"
+            f"• size: {diag.get('size', 'n/a')}\n"
+            f"• preview_chars: {diag.get('preview_chars', 'n/a')}"
+        ),
+    )
+
+
 async def cmd_health(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if _owner_only(update):
         await _reply(update, _health_report())
@@ -4961,6 +4993,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 /topskills — most used skills
 /clearctx — clear conversation context
 /exec command — run through agent
+/attachdiag — show latest attachment extraction diagnostics
 /panicstatus — show panic-lock state
 /paniclock arm|confirm <token> — enable panic-lock (2-step)
 /panicunlock <code> — disable panic-lock (requires env code)
@@ -5249,6 +5282,7 @@ def main() -> None:
             "go": cmd_go,
             "topskills": cmd_topskills,
             "exec": cmd_exec,
+            "attachdiag": cmd_attachdiag,
             "panicstatus": cmd_panicstatus,
             "paniclock": cmd_paniclock,
             "panicunlock": cmd_panicunlock,
