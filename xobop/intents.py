@@ -53,7 +53,11 @@ def extract_git_dir(cmd: str) -> Optional[str]:
 
 def refers_to_last_attachment(text: str) -> bool:
     t = text.strip().lower()
-    keys = ["use this", "that picture", "this picture", "this photo", "the picture", "the photo", "attach it", "attachment", "image"]
+    keys = [
+        "use this", "that picture", "this picture", "this photo", "the picture", "the photo",
+        "attach it", "attachment", "image", "this file", "that file", "this document",
+        "that document", "the document", "pdf", "doc", "docx", "screenshot",
+    ]
     return any(k in t for k in keys)
 
 

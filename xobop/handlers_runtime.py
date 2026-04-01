@@ -126,6 +126,7 @@ async def process_text_message(
     panic_locked,
     panic_bypass_text,
     command_aliases_getter,
+    analyze_attachment,
     op_event,
     log,
 ) -> bool:
@@ -138,7 +139,20 @@ async def process_text_message(
         return True
 
     if refers_to_last_attachment(text) and chat_id in state.last_attachment_by_chat:
-        text = f"{text}\n\nUse this local attachment path: {state.last_attachment_by_chat[chat_id]}"
+        attachment_path = state.last_attachment_by_chat[chat_id]
+        attachment_context = ""
+        if callable(analyze_attachment):
+            try:
+                attachment_context = (await analyze_attachment(attachment_path, text)) or ""
+            except Exception:
+                attachment_context = ""
+        if attachment_context:
+            text = (
+                f"{text}\n\nAttachment context (auto):\n{attachment_context}\n\n"
+                f"Use this local attachment path: {attachment_path}"
+            )
+        else:
+            text = f"{text}\n\nUse this local attachment path: {attachment_path}"
 
     if chat_id in state.pending_action_by_chat and refers_to_last_attachment(text) and chat_id not in state.last_attachment_by_chat:
         await reply(update, "Got it — please send the actual photo/file attachment now.")

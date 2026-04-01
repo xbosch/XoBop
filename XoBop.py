@@ -2250,6 +2250,76 @@ def _temperature_for_mode(mode: str) -> float:
     return 0.05 if mode == "strict" else 0.15
 
 
+async def _analyze_attachment(path: str, user_hint: str = "") -> str:
+    p = Path(path).expanduser().resolve()
+    if not p.exists():
+        return ""
+    size = p.stat().st_size
+    suffix = p.suffix.lower()
+    mime = mimetypes.guess_type(str(p))[0] or "application/octet-stream"
+
+    # Image understanding via multimodal model
+    if mime.startswith("image/"):
+        if size > 8 * 1024 * 1024:
+            return f"Attachment is image ({mime}, {size} bytes). Too large for inline analysis; use path directly."
+        b64 = base64.b64encode(p.read_bytes()).decode("ascii")
+        prompt = (
+            "Analyze this uploaded image for task execution. "
+            "Return concise structured notes: what it shows, key text (OCR), and actionable fields. "
+            "If it's a map/screenshot/document, extract source, destination, values, and units when visible."
+        )
+        if user_hint:
+            prompt += f" User request context: {user_hint[:300]}"
+        try:
+            resp = await client.chat.completions.create(
+                model=MODEL,
+                messages=[
+                    {"role": "system", "content": "You are a precise document/image parser."},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+                        ],
+                    },
+                ],
+                temperature=0.0,
+                max_tokens=700,
+            )
+            return (resp.choices[0].message.content or "").strip()
+        except Exception as exc:
+            return f"Attachment is image ({mime}, {size} bytes). Vision analysis unavailable: {str(exc)[:120]}"
+
+    # Text-like files: inline snippet
+    text_like = {".txt", ".md", ".json", ".yaml", ".yml", ".csv", ".log", ".ini", ".toml", ".xml", ".html", ".py", ".js", ".ts", ".sh"}
+    if suffix in text_like or mime.startswith("text/"):
+        raw = p.read_bytes()[:120000]
+        decoded = raw.decode("utf-8", errors="ignore").strip()
+        if decoded:
+            return f"Attachment text preview ({mime}, {size} bytes):\n{decoded[:2500]}"
+        return f"Attachment metadata: mime={mime}, size={size} bytes; no decodable UTF-8 text preview."
+
+    # PDF best-effort extraction
+    if suffix == ".pdf" or mime == "application/pdf":
+        try:
+            from pypdf import PdfReader  # type: ignore
+
+            reader = PdfReader(str(p))
+            chunks = []
+            for page in reader.pages[:8]:
+                t = (page.extract_text() or "").strip()
+                if t:
+                    chunks.append(t)
+            text = "\n\n".join(chunks).strip()
+            if text:
+                return f"PDF text extract ({size} bytes):\n{text[:3000]}"
+        except Exception:
+            pass
+        return f"Attachment is PDF ({size} bytes). Text extraction unavailable in current runtime; use conversion/OCR pipeline."
+
+    return f"Attachment metadata: name={p.name}, mime={mime}, size={size} bytes. Binary/non-text document; direct content extraction may require converter/OCR."
+
+
 async def _run_agent(chat_id: int, query: str, force: bool = False) -> str:
     mode = _get_mode()
 
@@ -4919,6 +4989,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             panic_locked=_panic_locked,
             panic_bypass_text=_is_panic_bypass_text,
             command_aliases_getter=_get_command_aliases,
+            analyze_attachment=_analyze_attachment,
             op_event=_record_op_event,
             log=log,
         )

@@ -83,6 +83,7 @@ def test_status_command_dispatched_via_registry():
             panic_locked=lambda: False,
             panic_bypass_text=lambda _t: False,
             command_aliases_getter=lambda: {},
+            analyze_attachment=lambda *_a, **_k: _noop(),
             op_event=lambda *a, **k: None,
             log=SimpleNamespace(exception=lambda *a, **k: None),
         )
@@ -159,6 +160,7 @@ def test_alias_resolves_before_dispatch_and_preserves_args():
             panic_locked=lambda: False,
             panic_bypass_text=lambda _t: False,
             command_aliases_getter=lambda: {"statu": "status", "cronru": "cronrun"},
+            analyze_attachment=lambda *_a, **_k: _noop(),
             op_event=lambda *a, **k: events.append((a, k)),
             log=SimpleNamespace(exception=lambda *a, **k: None),
         )
@@ -207,6 +209,7 @@ def test_alias_resolves_before_dispatch_and_preserves_args():
             panic_locked=lambda: False,
             panic_bypass_text=lambda _t: False,
             command_aliases_getter=lambda: {"statu": "status", "cronru": "cronrun"},
+            analyze_attachment=lambda *_a, **_k: _noop(),
             op_event=lambda *a, **k: events.append((a, k)),
             log=SimpleNamespace(exception=lambda *a, **k: None),
         )
