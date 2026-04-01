@@ -128,6 +128,13 @@ from xobop.commands_memory import (
     cmd_tasks_impl,
     cmd_topskills_impl,
 )
+from xobop.commands_safety import (
+    cmd_delfact_impl,
+    cmd_exec_impl,
+    cmd_paniclock_impl,
+    cmd_panicstatus_impl,
+    cmd_panicunlock_impl,
+)
 from xobop.io_text import fetch_text_limited as io_fetch_text_limited, read_text_limited as io_read_text_limited
 from xobop.shell_policy import classify_shell as sp_classify_shell, user_forced as sp_user_forced
 from xobop.improve import (
@@ -3755,10 +3762,7 @@ async def cmd_remember(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_delfact(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
-    key = update.message.text.partition(" ")[2].strip()
-    await _reply(update, _delete_fact(key) if key else "Use: `/delfact key`")
+    await cmd_delfact_impl(update=update, owner_only=_owner_only, reply=_reply, delete_fact=_delete_fact)
 
 
 async def cmd_addtask(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4271,24 +4275,17 @@ async def cmd_memdel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_exec(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
-    if _panic_locked():
-        await _reply(update, "⛔ Panic-lock active: /exec disabled.")
-        return
-    chat_id = update.effective_chat.id
-    command = update.message.text.partition(" ")[2].strip()
-    if not command:
-        await _reply(update, "Use: `/exec <command>`")
-        return
-    STATE.last_exec_by_chat[chat_id] = command
-    await update.message.chat.send_action(ChatAction.TYPING)
-    try:
-        result = await _call_skill(chat_id, update.message.text, _get_mode(), "run_shell", {"command": command})
-        await _reply(update, result)
-    except Exception as exc:
-        log.exception("cmd_exec failed")
-        await _reply(update, f"⚠️ Error: {str(exc)[:200]}")
+    await cmd_exec_impl(
+        update=update,
+        owner_only=_owner_only,
+        reply=_reply,
+        panic_locked=_panic_locked,
+        state=STATE,
+        get_mode=_get_mode,
+        call_skill=_call_skill,
+        log=log,
+        chat_action_typing=lambda u: u.message.chat.send_action(ChatAction.TYPING),
+    )
 
 
 async def cmd_skills(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4488,64 +4485,35 @@ async def cmd_clearctx(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_panicstatus(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
-    lock = "ON" if _panic_locked() else "OFF"
-    arm = (_get_setting("panic_arm_token", "") or "").strip()
-    await _reply(update, f"Panic-lock: {lock}\nArmed: {'yes' if arm else 'no'}")
+    await cmd_panicstatus_impl(
+        update=update,
+        owner_only=_owner_only,
+        reply=_reply,
+        panic_locked=_panic_locked,
+        get_setting=_get_setting,
+    )
 
 
 async def cmd_paniclock(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
-    raw = update.message.text.partition(" ")[2].strip()
-    now = int(time.time())
-
-    if raw == "arm":
-        token = uuid.uuid4().hex[:12]
-        _set_setting("panic_arm_token", token)
-        _set_setting("panic_arm_ts", str(now))
-        await _reply(update, f"⚠️ Panic-lock arm set. Confirm within 120s:\n`/paniclock confirm {token}`")
-        return
-
-    if raw.startswith("confirm "):
-        token = raw.split(" ", 1)[1].strip()
-        armed = (_get_setting("panic_arm_token", "") or "").strip()
-        try:
-            arm_ts = int((_get_setting("panic_arm_ts", "0") or "0").strip())
-        except Exception:
-            arm_ts = 0
-        if not armed or token != armed:
-            await _reply(update, "⛔ Invalid arm token. Use `/paniclock arm` first.")
-            return
-        if (now - arm_ts) > 120:
-            _set_setting("panic_arm_token", "")
-            _set_setting("panic_arm_ts", "0")
-            await _reply(update, "⛔ Arm token expired. Run `/paniclock arm` again.")
-            return
-        _set_setting("panic_lock", "1")
-        _set_setting("panic_arm_token", "")
-        _set_setting("panic_arm_ts", "0")
-        await _reply(update, "🛑 Panic-lock enabled. Exec/write/cron operations are now blocked.")
-        return
-
-    await _reply(update, "Use: `/paniclock arm` then `/paniclock confirm <token>`")
+    await cmd_paniclock_impl(
+        update=update,
+        owner_only=_owner_only,
+        reply=_reply,
+        now_ts=int(time.time()),
+        set_setting=_set_setting,
+        get_setting=_get_setting,
+        uuid_hex12=uuid.uuid4().hex[:12],
+    )
 
 
 async def cmd_panicunlock(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
-    code = update.message.text.partition(" ")[2].strip()
-    if not PANIC_UNLOCK_CODE:
-        await _reply(update, "⛔ PANIC_UNLOCK_CODE is not configured in environment.")
-        return
-    if not code or code != PANIC_UNLOCK_CODE:
-        await _reply(update, "⛔ Invalid unlock code.")
-        return
-    _set_setting("panic_lock", "0")
-    _set_setting("panic_arm_token", "")
-    _set_setting("panic_arm_ts", "0")
-    await _reply(update, "✅ Panic-lock disabled.")
+    await cmd_panicunlock_impl(
+        update=update,
+        owner_only=_owner_only,
+        reply=_reply,
+        panic_unlock_code=PANIC_UNLOCK_CODE,
+        set_setting=_set_setting,
+    )
 
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
