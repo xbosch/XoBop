@@ -72,8 +72,6 @@ from xobop.runtime_ops import (
     to_thread as ops_to_thread,
 )
 from xobop.attachments import extract_docx_text, extract_xlsx_text, summarize_zip
-from xobop.commands_core import build_attachdiag_text, build_state_check_text, build_status_text
-from xobop.commands_ops import parse_int_or_default
 from xobop.text_math import cosine as tm_cosine, deterministic_hash as tm_hash, hours_since as tm_hours_since, recency_score as tm_recency_score, split_words as tm_split_words
 from xobop.policy_helpers import blocked_suffix as ph_blocked_suffix, domain_allowed as ph_domain_allowed, is_under_root as ph_is_under_root
 from xobop.artifacts_io import shorten_or_artifact as aio_shorten_or_artifact, store_artifact as aio_store_artifact
@@ -83,7 +81,7 @@ from xobop.runtime_state import (
     build_state_check_dict as rs_build_state_check_dict,
     repair_from_snapshot as rs_repair_from_snapshot,
 )
-from xobop.mode_utils import mode_help_text as mu_mode_help_text, temperature_for_mode as mu_temperature_for_mode
+from xobop.mode_utils import temperature_for_mode as mu_temperature_for_mode
 from xobop.ops_logging import record_op_event as ol_record_op_event, record_run as ol_record_run, update_skill_usage as ol_update_skill_usage
 from xobop.runtime_snapshot import (
     export_runtime_snapshot as rsnap_export,
@@ -91,6 +89,15 @@ from xobop.runtime_snapshot import (
     startup_reconcile_runtime_state as rsnap_startup_reconcile,
 )
 from xobop.selfmods import apply_self_mods_defaults as sm_apply_defaults, export_self_mods_debug as sm_export_debug
+from xobop.commands_admin import (
+    cmd_attachdiag_impl,
+    cmd_diagnose_impl,
+    cmd_mode_impl,
+    cmd_op_sanity_impl,
+    cmd_state_check_impl,
+    cmd_state_repair_impl,
+    cmd_status_impl,
+)
 from xobop.io_text import fetch_text_limited as io_fetch_text_limited, read_text_limited as io_read_text_limited
 from xobop.shell_policy import classify_shell as sp_classify_shell, user_forced as sp_user_forced
 from xobop.improve import (
@@ -3760,15 +3767,15 @@ async def cmd_tasks(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_mode(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
-    requested = update.message.text.partition(" ")[2].strip().lower()
-    if requested in MODES:
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, lambda: _set_setting("mode", requested))
-        await _reply(update, f"Mode set to *{requested}*.")
-    else:
-        await _reply(update, mu_mode_help_text(_get_mode()))
+    await cmd_mode_impl(
+        update=update,
+        owner_only=_owner_only,
+        reply=_reply,
+        modes=MODES,
+        set_setting=_set_setting,
+        get_mode=_get_mode,
+        to_thread=_to_thread,
+    )
 
 
 async def cmd_promptshow(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4046,28 +4053,19 @@ async def cmd_go(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
-    chat_id = update.effective_chat.id
-    await _reply(
-        update,
-        build_status_text(
-            chat_id=chat_id,
-            model=MODEL,
-            embedding_model=EMBEDDING_MODEL,
-            get_mode=_get_mode,
-            get_db=get_db,
-        ),
+    await cmd_status_impl(
+        update=update,
+        owner_only=_owner_only,
+        reply=_reply,
+        model=MODEL,
+        embedding_model=EMBEDDING_MODEL,
+        get_mode=_get_mode,
+        get_db=get_db,
     )
 
 
 async def cmd_attachdiag(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
-    chat_id = update.effective_chat.id
-    path = STATE.last_attachment_by_chat.get(chat_id)
-    diag = STATE.last_attachment_diag_by_chat.get(chat_id, {})
-    await _reply(update, build_attachdiag_text(path=path, diag=diag))
+    await cmd_attachdiag_impl(update=update, owner_only=_owner_only, reply=_reply, state=STATE)
 
 
 async def cmd_health(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4076,34 +4074,25 @@ async def cmd_health(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_state_check(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
-    d = _state_check_dict()
-    await _reply(update, build_state_check_text(state_check=d))
+    await cmd_state_check_impl(update=update, owner_only=_owner_only, reply=_reply, state_check_dict=_state_check_dict)
 
 
 async def cmd_state_repair(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
-    rep = _repair_state_from_snapshot()
-    _record_op_event("state_repair", chat_id=update.effective_chat.id, status=("ok" if rep.startswith("✅") else "error"))
-    await _reply(update, rep)
+    await cmd_state_repair_impl(
+        update=update,
+        owner_only=_owner_only,
+        reply=_reply,
+        repair_state_from_snapshot=_repair_state_from_snapshot,
+        record_op_event=_record_op_event,
+    )
 
 
 async def cmd_op_sanity(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
-    raw = update.message.text.partition(" ")[2].strip()
-    hours = parse_int_or_default(raw, 24)
-    await _reply(update, _op_sanity_report(hours))
+    await cmd_op_sanity_impl(update=update, owner_only=_owner_only, reply=_reply, op_sanity_report=_op_sanity_report)
 
 
 async def cmd_diagnose(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
-    raw = update.message.text.partition(" ")[2].strip()
-    days = parse_int_or_default(raw, 7)
-    await _reply(update, _diagnose_report(days))
+    await cmd_diagnose_impl(update=update, owner_only=_owner_only, reply=_reply, diagnose_report=_diagnose_report)
 
 
 async def cmd_improve_propose(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
