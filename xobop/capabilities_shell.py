@@ -46,7 +46,7 @@ async def exec_shell_command(
     raw_allowed = policies.get("allow_raw_shell", "0") == "1"
     if raw and not raw_allowed:
         return "⛔ Raw shell disabled by skill policy.", None, "blocked", None
-    if (requires_force or policy.requires_force or raw) and not user_forced(user_query):
+    if (requires_force or policy.requires_force) and not user_forced(user_query):
         return f"⛔ Blocked ({policy.kind}, raw={raw}). Add 'force' to proceed.\nCommand: {command}", None, "blocked", None
 
     segments = [s.strip() for s in command.split("&&") if s.strip()]
@@ -54,14 +54,44 @@ async def exec_shell_command(
         return "⛔ Empty command.", None, "blocked", None
 
     # Human-in-the-loop gate for write-like operations outside allowed root.
-    write_tokens = ("rm ", "mv ", "cp ", "tee ", "sed -i", ">", "mkdir ", "touch ")
+    write_tokens = ("rm ", "mv ", "cp ", "tee ", "sed -i", ">", "mkdir ", "touch ", "chmod ", "chown ")
     write_root = Path(policies.get("write_root") or ".").resolve()
     for seg in segments:
-        if any(tok in seg for tok in write_tokens):
+        if not any(tok in seg for tok in write_tokens):
+            continue
+
+        targets: list[str] = []
+        try:
+            argv = shlex.split(seg)
+        except Exception:
+            argv = []
+
+        if argv:
+            # Redirection targets
+            for i, tok in enumerate(argv):
+                if tok in {">", ">>", "1>", "1>>", "2>", "2>>"} and i + 1 < len(argv):
+                    targets.append(argv[i + 1])
+
+            # File-like args for common write commands
+            if argv[0] in {"mkdir", "touch", "chmod", "chown", "rm", "mv", "cp", "tee", "sed", "perl"}:
+                for a in argv[1:]:
+                    if a.startswith("-") or a in {">", ">>", "1>", "1>>", "2>", "2>>"}:
+                        continue
+                    targets.append(a)
+
+        # Fallback absolute token scan (ignore quoted/script text containing whitespace/newlines)
+        if not targets:
             for m in re.findall(r"(/[^\s'\"]+)", seg):
-                p = Path(m).resolve()
-                if p.exists() and not str(p).startswith(str(write_root)) and not user_forced(user_query):
-                    return f"⛔ Write-like command targets path outside allowed root ({write_root}). Add 'force' to proceed. Path: {p}", None, "blocked", None
+                targets.append(m)
+
+        for t in targets:
+            if not t.startswith("/"):
+                continue
+            if any(ch.isspace() for ch in t):
+                continue
+            p = Path(t).resolve()
+            if not str(p).startswith(str(write_root)) and not user_forced(user_query):
+                return f"⛔ Write-like command targets path outside allowed root ({write_root}). Add 'force' to proceed. Path: {p}", None, "blocked", None
 
     outputs = [f"Kind: {policy.kind}", f"CWD: {cwd}"]
     last_rc: Optional[int] = 0
@@ -70,7 +100,12 @@ async def exec_shell_command(
         if allowed_commands and argv and argv[0] not in allowed_commands:
             return f"⛔ Command '{argv[0]}' blocked by skill allowlist.", None, "blocked", None
 
-        stdout, stderr, rc = await run_shell_async(seg, cwd, timeout, raw=False)
+        needs_shell = bool(re.search(r"(>|<|\||;|\$\(|`)", seg))
+        run_raw = bool(raw or needs_shell)
+        if run_raw and not raw_allowed:
+            return "⛔ Shell metacharacters detected but raw shell is disabled by policy (set ALLOW_RAW_SHELL=1).", None, "blocked", None
+
+        stdout, stderr, rc = await run_shell_async(seg, cwd, timeout, raw=run_raw)
         outputs.append(f"[step {i}] $ {seg}")
         if stdout.strip():
             outputs.append(f"STDOUT:\n{stdout.strip()}")
