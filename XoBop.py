@@ -145,6 +145,21 @@ from xobop.commands_cron import (
     cmd_cronrun_impl,
     cmd_cronruns_impl,
 )
+from xobop.commands_prompt import (
+    cmd_promptset_impl,
+    cmd_promptshow_impl,
+    cmd_quietflush_impl,
+    cmd_quietoff_impl,
+    cmd_quiethours_impl,
+)
+from xobop.skills_runtime import (
+    call_skill_impl as sr_call_skill_impl,
+    exec_file_append as sr_exec_file_append,
+    exec_file_read as sr_exec_file_read,
+    exec_file_write as sr_exec_file_write,
+    exec_http_get as sr_exec_http_get,
+    exec_shell_command as sr_exec_shell_command,
+)
 from xobop.io_text import fetch_text_limited as io_fetch_text_limited, read_text_limited as io_read_text_limited
 from xobop.shell_policy import classify_shell as sp_classify_shell, user_forced as sp_user_forced
 from xobop.improve import (
@@ -1910,197 +1925,105 @@ def _record_run(
 
 
 async def _exec_file_read(skill: SkillDef, policies: dict, args: dict) -> tuple[str, Optional[int], str, Optional[str]]:
-    root = Path(policies.get("read_root", str(READ_ROOT))).resolve()
-    max_bytes = int(policies.get("max_bytes", str(MAX_READ_BYTES)))
-    path = Path(args["path"]).expanduser().resolve()
-    if not _is_under_root(path, root):
-        return f"⛔ Path outside read root: {root}", None, "blocked", None
-    full = await _to_thread(_read_text_limited, path, max_bytes)
-    result, artifact = _shorten_or_artifact(skill.name, full)
-    return result, None, "ok", artifact
+    return await sr_exec_file_read(
+        skill=skill,
+        policies=policies,
+        args=args,
+        read_root=READ_ROOT,
+        max_read_bytes=MAX_READ_BYTES,
+        is_under_root=_is_under_root,
+        to_thread=_to_thread,
+        read_text_limited=_read_text_limited,
+        shorten_or_artifact=_shorten_or_artifact,
+    )
 
 
 async def _exec_http_get(skill: SkillDef, policies: dict, args: dict) -> tuple[str, Optional[int], str, Optional[str]]:
-    url = args["url"]
-    if not _domain_allowed(url):
-        return "⛔ URL domain blocked by global policy.", None, "blocked", None
-    max_bytes = int(policies.get("max_bytes", str(MAX_BROWSE_BYTES)))
-    full = await _to_thread(_fetch_text_limited, url, max_bytes)
-    result, artifact = _shorten_or_artifact(skill.name, full)
-    return result, None, "ok", artifact
+    return await sr_exec_http_get(
+        skill=skill,
+        policies=policies,
+        args=args,
+        domain_allowed=_domain_allowed,
+        max_browse_bytes=MAX_BROWSE_BYTES,
+        to_thread=_to_thread,
+        fetch_text_limited=_fetch_text_limited,
+        shorten_or_artifact=_shorten_or_artifact,
+    )
 
 
 async def _exec_file_write(skill: SkillDef, policies: dict, args: dict) -> tuple[str, Optional[int], str, Optional[str]]:
-    root = Path(policies.get("write_root", str(ALLOWED_WRITE_ROOT))).resolve()
-    path = Path(args["path"]).expanduser().resolve()
-    overwrite = bool(args.get("overwrite", False))
-    content = args["content"]
-    if not _is_under_root(path, root):
-        return f"⛔ Write blocked outside root: {root}", None, "blocked", None
-    blocked = _blocked_suffix(path)
-    if blocked:
-        return f"⛔ Writing files with suffix {blocked} is blocked.", None, "blocked", None
-    if len(content.encode("utf-8")) > int(_get_policy("max_write_size", DEFAULT_GLOBAL_POLICIES["max_write_size"])):
-        return "⛔ Write size exceeds global policy.", None, "blocked", None
-    if path.exists() and not overwrite:
-        return f"⛔ Blocked overwrite without overwrite=true: {path}", None, "blocked", None
-
-    def _do_write():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
-
-    await _to_thread(_do_write)
-    return f"Written {len(content):,} chars → {path}", None, "ok", None
+    return await sr_exec_file_write(
+        skill=skill,
+        policies=policies,
+        args=args,
+        allowed_write_root=ALLOWED_WRITE_ROOT,
+        is_under_root=_is_under_root,
+        blocked_suffix=_blocked_suffix,
+        get_policy=_get_policy,
+        default_max_write_size=DEFAULT_GLOBAL_POLICIES["max_write_size"],
+        to_thread=_to_thread,
+    )
 
 
 async def _exec_file_append(skill: SkillDef, policies: dict, args: dict) -> tuple[str, Optional[int], str, Optional[str]]:
-    root = Path(policies.get("write_root", str(ALLOWED_WRITE_ROOT))).resolve()
-    path = Path(args["path"]).expanduser().resolve()
-    content = args["content"]
-    if not _is_under_root(path, root):
-        return f"⛔ Write blocked outside root: {root}", None, "blocked", None
-    blocked = _blocked_suffix(path)
-    if blocked:
-        return f"⛔ Writing files with suffix {blocked} is blocked.", None, "blocked", None
-    if len(content.encode("utf-8")) > int(_get_policy("max_write_size", DEFAULT_GLOBAL_POLICIES["max_write_size"])):
-        return "⛔ Write size exceeds global policy.", None, "blocked", None
-
-    def _do_append():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as f:
-            f.write(content)
-
-    await _to_thread(_do_append)
-    return f"Appended {len(content):,} chars → {path}", None, "ok", None
+    return await sr_exec_file_append(
+        skill=skill,
+        policies=policies,
+        args=args,
+        allowed_write_root=ALLOWED_WRITE_ROOT,
+        is_under_root=_is_under_root,
+        blocked_suffix=_blocked_suffix,
+        get_policy=_get_policy,
+        default_max_write_size=DEFAULT_GLOBAL_POLICIES["max_write_size"],
+        to_thread=_to_thread,
+    )
 
 
 async def _exec_shell_command(skill: SkillDef, policies: dict, user_query: str, args: dict) -> tuple[str, Optional[int], str, Optional[str]]:
-    async def _legacy_runner(command: str, cwd: Optional[str], timeout: Optional[int], raw: bool) -> tuple[str, Optional[int], str, Optional[str]]:
-        run_args = dict(args)
-        run_args["command"] = command
-        if cwd:
-            run_args["cwd"] = cwd
-        if timeout is not None:
-            run_args["timeout_override"] = int(timeout)
-        run_args["raw"] = bool(raw)
-        return await exec_shell_command(
-            skill_name=skill.name,
-            requires_force=skill.requires_force,
-            policies=policies,
-            user_query=user_query,
-            args=run_args,
-            classify_shell=_classify_shell,
-            user_forced=_user_forced,
-            run_shell_async=_run_shell_async,
-            shorten_or_artifact=_shorten_or_artifact,
-        )
-
-    if not USE_CAPABILITY_FACADE_SHELL:
-        return await _legacy_runner(
-            str(args.get("command", "")),
-            args.get("cwd"),
-            args.get("timeout_override"),
-            bool(args.get("raw", False)),
-        )
-
-    shell = get_shell_executor(mode="live", legacy_runner=_legacy_runner)
-    cap = await shell.run(
-        command=str(args.get("command", "")),
-        cwd=args.get("cwd"),
-        timeout=(int(args.get("timeout_override")) if args.get("timeout_override") is not None else None),
-        raw=bool(args.get("raw", False)),
+    return await sr_exec_shell_command(
+        skill=skill,
+        policies=policies,
+        user_query=user_query,
+        args=args,
+        use_capability_facade_shell=USE_CAPABILITY_FACADE_SHELL,
+        get_shell_executor=get_shell_executor,
+        exec_shell_command_capability=exec_shell_command,
     )
-    # Facade live output preserves legacy tuple format for compatibility.
-    return cap.output
 
 
 async def _call_skill(chat_id: int, user_query: str, mode: str, skill_name: str, args: dict) -> str:
-    start = time.monotonic()
-    if _panic_locked() and skill_name not in {"read_file", "browse_page"}:
-        return "⛔ Panic-lock active: execution skills are disabled. Use /panicstatus or /panicunlock <code>."
-    exit_code: Optional[int] = None
-    status = "ok"
-    artifact_path: Optional[str] = None
-    result = f"Unknown skill: {skill_name}"
-
-    tool_limit = int(_get_policy("tool_calls_per_minute", DEFAULT_GLOBAL_POLICIES["tool_calls_per_minute"]))
-    ok, msg = _enforce_rate_limit("tool_calls", tool_limit)
-    if not ok:
-        return f"{msg}\nRATE_LIMIT_BUCKET=tool_calls\nSUGGESTED_ACTION=retry_with_backoff"
-
-    try:
-        skill = _get_skill(skill_name)
-        policies = _load_skill_policies(skill.name)
-
-        # Hard bind critical runtime shell boundaries to current process config.
-        # This prevents stale DB policy rows from pointing to old clones/paths.
-        if skill.name == "run_shell":
-            policies["write_root"] = str(ALLOWED_WRITE_ROOT)
-            policies["default_cwd"] = str(PROJECT_ROOT)
-            policies["allow_raw_shell"] = "1" if ALLOW_RAW_SHELL else "0"
-
-        if skill.handler_type == "shell_command":
-            shell_limit = int(_get_policy("shell_calls_per_minute", DEFAULT_GLOBAL_POLICIES["shell_calls_per_minute"]))
-            ok, msg = _enforce_rate_limit("shell_calls", shell_limit)
-            if not ok:
-                return (
-                    f"{msg}\n"
-                    "RUN_STATUS=FAIL\n"
-                    "ERROR=Shell rate limit active; execution blocked\n"
-                    "RATE_LIMIT_BUCKET=shell_calls"
-                )
-
-        if _user_forced(user_query):
-            _record_op_event("manual_override", chat_id=chat_id, route=skill_name, status="ok")
-
-        handler_registry = {
-            "file_read": lambda: _exec_file_read(skill, policies, args),
-            "http_get": lambda: _exec_http_get(skill, policies, args),
-            "file_write": lambda: _exec_file_write(skill, policies, args),
-            "file_append": lambda: _exec_file_append(skill, policies, args),
-            "shell_command": lambda: _exec_shell_command(skill, policies, user_query, args),
-        }
-
-        if skill.requires_force and not _user_forced(user_query):
-            result, status = f"⛔ Skill '{skill.name}' requires force.", "blocked"
-        else:
-            fn = handler_registry.get(skill.handler_type)
-            if not fn:
-                result, status = f"Unknown handler_type: {skill.handler_type}", "error"
-            else:
-                result, exit_code, status, artifact_path = await fn()
-
-    except asyncio.TimeoutError as exc:
-        result, status = f"⏱ Timeout: {exc}", "timeout"
-    except Exception as exc:
-        log.exception("Skill %s failed", skill_name)
-        result, status = f"Error: {exc}", "error"
-
-    duration_ms = int((time.monotonic() - start) * 1000)
-    loop = asyncio.get_running_loop()
-    _fire_and_forget(
-        loop,
-        lambda: _record_run(chat_id, user_query, mode, skill_name, args, result, exit_code, duration_ms, status, artifact_path),
-        label=f"record_run:{skill_name}",
+    handlers = {
+        "file_read": lambda **kw: _exec_file_read(kw["skill"], kw["policies"], kw["args"]),
+        "http_get": lambda **kw: _exec_http_get(kw["skill"], kw["policies"], kw["args"]),
+        "file_write": lambda **kw: _exec_file_write(kw["skill"], kw["policies"], kw["args"]),
+        "file_append": lambda **kw: _exec_file_append(kw["skill"], kw["policies"], kw["args"]),
+        "shell_command": lambda **kw: _exec_shell_command(kw["skill"], kw["policies"], kw["user_query"], kw["args"]),
+    }
+    return await sr_call_skill_impl(
+        chat_id=chat_id,
+        user_query=user_query,
+        mode=mode,
+        skill_name=skill_name,
+        args=args,
+        panic_locked=_panic_locked,
+        record_op_event=_record_op_event,
+        get_policy=_get_policy,
+        default_global_policies=DEFAULT_GLOBAL_POLICIES,
+        enforce_rate_limit=_enforce_rate_limit,
+        get_skill=_get_skill,
+        load_skill_policies=_load_skill_policies,
+        allowed_write_root=ALLOWED_WRITE_ROOT,
+        project_root=PROJECT_ROOT,
+        allow_raw_shell=ALLOW_RAW_SHELL,
+        user_forced=_user_forced,
+        handlers=handlers,
+        log=log,
+        to_thread=_to_thread,
+        record_run=_record_run,
+        update_skill_usage=_update_skill_usage,
+        audit_skill=_audit_skill,
+        fire_and_forget=_fire_and_forget,
     )
-    _fire_and_forget(
-        loop,
-        lambda: _update_skill_usage(skill_name, duration_ms, status),
-        label=f"skill_usage:{skill_name}",
-    )
-    _fire_and_forget(
-        loop,
-        lambda: _audit_skill(
-            skill_name,
-            "call",
-            note=status,
-            owner_id=(OWNER_ID if chat_id != 0 else None),
-            cmd_input=(args.get("command", user_query) if isinstance(args, dict) else user_query),
-            exit_code=exit_code,
-        ),
-        label=f"skill_audit:{skill_name}",
-    )
-    return result
 
 
 # =============================================================================
@@ -3804,96 +3727,32 @@ async def cmd_mode(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_promptshow(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
-    mode = _get_mode()
-    prompt = _get_runtime_prompt(mode)
-    await _reply(update, f"*Mode:* {mode}\n*Prompt chars:* {len(prompt)}\n\n{prompt}")
+    await cmd_promptshow_impl(update=update, owner_only=_owner_only, reply=_reply, get_mode=_get_mode, get_runtime_prompt=_get_runtime_prompt)
 
 
 async def cmd_promptset(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
-    raw = update.message.text.partition(" ")[2].strip()
-    if not raw:
-        await _reply(update, "Use: `/promptset <strict|normal|overseer> <prompt text>` or `/promptset <mode> reset`")
-        return
-    parts = raw.split(" ", 1)
-    mode = parts[0].strip().lower()
-    if mode not in MODES:
-        await _reply(update, "Mode must be `strict`, `normal`, or `overseer`.")
-        return
-    if len(parts) < 2 or not parts[1].strip():
-        await _reply(update, "Missing prompt text. Example: `/promptset strict You are...`")
-        return
-
-    value = parts[1].strip()
-    if value.lower() == "reset":
-        value = STRICT_PROMPT if mode == "strict" else NORMAL_PROMPT
-
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, lambda: _set_runtime_prompt(mode, value))
-    await _reply(update, f"✅ Updated *{mode}* prompt ({len(value)} chars).")
+    await cmd_promptset_impl(
+        update=update,
+        owner_only=_owner_only,
+        reply=_reply,
+        modes=MODES,
+        set_runtime_prompt=_set_runtime_prompt,
+        strict_prompt=STRICT_PROMPT,
+        normal_prompt=NORMAL_PROMPT,
+        to_thread=_to_thread,
+    )
 
 
 async def cmd_quiethours(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
-    raw = update.message.text.partition(" ")[2].strip()
-    if not raw:
-        cur = _get_setting("quiet_hours", "") or "off"
-        await _reply(update, f"Current quiet hours: {cur}. Use `/quiethours HH:MM-HH:MM`.")
-        return
-    if not re.match(r"^\d{2}:\d{2}-\d{2}:\d{2}$", raw):
-        await _reply(update, "Format: `/quiethours HH:MM-HH:MM` (24h)")
-        return
-    _set_setting("quiet_hours", raw)
-    await _reply(update, f"✅ Quiet hours set: {raw}")
+    await cmd_quiethours_impl(update=update, owner_only=_owner_only, reply=_reply, get_setting=_get_setting, set_setting=_set_setting)
 
 
 async def cmd_quietoff(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
-    _set_setting("quiet_hours", "")
-    await _reply(update, "✅ Quiet hours disabled")
+    await cmd_quietoff_impl(update=update, owner_only=_owner_only, reply=_reply, set_setting=_set_setting)
 
 
 async def cmd_quietflush(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _owner_only(update):
-        return
-    with get_db() as conn:
-        rows = conn.execute("SELECT id,text FROM notification_queue WHERE delivered=0 ORDER BY id ASC LIMIT 50").fetchall()
-    if not rows:
-        await _reply(update, "No queued notifications.")
-        return
-
-    texts = [r["text"] for r in rows]
-    summary = ""
-    try:
-        joined = "\n".join(texts)[:4000]
-        resp = await client.chat.completions.create(
-            model=MODEL,
-            messages=[
-                {"role": "system", "content": "Summarize queued system notifications in 1-2 sentences with the most important item first."},
-                {"role": "user", "content": joined},
-            ],
-            temperature=0.1,
-            max_tokens=140,
-        )
-        summary = (resp.choices[0].message.content or "").strip()
-    except Exception:
-        summary = "Queued notifications summarized unavailable; sending raw count only."
-
-    sent = 0
-    for r in rows:
-        try:
-            with get_db() as conn:
-                conn.execute("UPDATE notification_queue SET delivered=1,delivered_ts=CURRENT_TIMESTAMP WHERE id=?", (int(r["id"]),))
-            sent += 1
-        except Exception:
-            pass
-
-    await _reply(update, f"Quiet-hours digest ({sent} items):\n{summary}")
+    await cmd_quietflush_impl(update=update, owner_only=_owner_only, reply=_reply, get_db=get_db, client=client, model=MODEL)
 
 
 async def cmd_promptproposal(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
