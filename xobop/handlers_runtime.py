@@ -13,6 +13,21 @@ from .services import run_direct_shell, run_download_count, run_execute_last, ru
 from .workflows import handle_attachment_arrival, handle_email_text
 
 
+def resolve_command_alias(raw_text: str, aliases: dict[str, str]) -> tuple[str, bool, str | None]:
+    text = (raw_text or "").strip()
+    if not text.startswith("/"):
+        return raw_text, False, None
+    parts = text.split(maxsplit=1)
+    cmd = parts[0][1:].strip().lower()
+    rest = parts[1] if len(parts) > 1 else ""
+    target = (aliases or {}).get(cmd)
+    if not target:
+        return raw_text, False, None
+    resolved = str(target).strip().lower()
+    rewritten = f"/{resolved}" + (f" {rest}" if rest else "")
+    return rewritten, True, resolved
+
+
 async def process_media_message(*, update, state, artifact_dir: str, owner_only, reply, log) -> bool:
     if not owner_only(update):
         return True
@@ -148,7 +163,12 @@ async def process_text_message(
                 await reply(update, f"⚠️ Email send failed: {str(exc)[:180]}")
             return True
 
+    aliases = command_aliases_getter() or {}
+    text, alias_changed, resolved_command = resolve_command_alias(text, aliases)
     lower = text.lower()
+    if alias_changed:
+        op_event("command_alias_applied", chat_id=chat_id, command=resolved_command or "", metadata={"rewritten": text})
+
     if lower.startswith("/exec "):
         op_event("route_selected", chat_id=chat_id, route="cmd_exec")
         cmd = text[6:].strip()
@@ -203,7 +223,6 @@ async def process_text_message(
     if text.startswith("/"):
         cmd = text.split()[0]
         key = cmd.lstrip("/").lower()
-        aliases = command_aliases_getter() or {}
         sug = aliases.get(key)
         op_event("unknown_command", chat_id=chat_id, command=cmd, status="error", metadata={"suggested": sug or ""})
         if sug:

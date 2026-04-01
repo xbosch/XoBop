@@ -89,3 +89,130 @@ def test_status_command_dispatched_via_registry():
 
     asyncio.run(run())
     assert called["status"] == 1
+
+
+def test_alias_resolves_before_dispatch_and_preserves_args():
+    called = {"status": 0, "cronrun": 0}
+
+    async def cmd_status(_u):
+        called["status"] += 1
+
+    async def cmd_cronrun(_u):
+        called["cronrun"] += 1
+
+    async def _noop(*_args, **_kwargs):
+        return None
+
+    update = DummyUpdate()
+    state = SimpleNamespace(
+        last_attachment_by_chat={},
+        pending_action_by_chat={},
+        last_email_status_by_chat={},
+        last_exec_by_chat={},
+    )
+
+    events = []
+
+    async def run():
+        await process_text_message(
+            update=update,
+            text="/statu full",
+            chat_id=1,
+            state=state,
+            reply=_noop,
+            call_skill=_noop,
+            mode_getter=lambda: "strict",
+            list_cron_jobs=lambda: "",
+            run_agent=lambda *_: _noop(),
+            owner_only=lambda _u: True,
+            cmd_cronadd=_noop,
+            cmd_cronlist=_noop,
+            cmd_cronrun=cmd_cronrun,
+            cmd_cronruns=_noop,
+            cmd_status=cmd_status,
+            cmd_health=_noop,
+            cmd_checkup=_noop,
+            cmd_state_check=_noop,
+            cmd_state_repair=_noop,
+            cmd_op_sanity=_noop,
+            cmd_diagnose=_noop,
+            cmd_improve_propose=_noop,
+            cmd_improve_list=_noop,
+            cmd_improve_compile=_noop,
+            cmd_improve_artifacts=_noop,
+            cmd_improve_simulate=_noop,
+            cmd_improve_runs=_noop,
+            cmd_improve_compare=_noop,
+            cmd_improve_policy=_noop,
+            cmd_improve_promote=_noop,
+            cmd_improve_autopromote=_noop,
+            cmd_improve_funnel=_noop,
+            cmd_improve_eval_report=_noop,
+            cmd_improve_weekly_report=_noop,
+            cmd_improve_phase=_noop,
+            cmd_improve_log_rollback=_noop,
+            cmd_evolve_capture=_noop,
+            cmd_evolve_memory=_noop,
+            cmd_panicstatus=_noop,
+            cmd_paniclock=_noop,
+            cmd_panicunlock=_noop,
+            panic_locked=lambda: False,
+            panic_bypass_text=lambda _t: False,
+            command_aliases_getter=lambda: {"statu": "status", "cronru": "cronrun"},
+            op_event=lambda *a, **k: events.append((a, k)),
+            log=SimpleNamespace(exception=lambda *a, **k: None),
+        )
+        await process_text_message(
+            update=update,
+            text="/cronru load-heartbeat",
+            chat_id=1,
+            state=state,
+            reply=_noop,
+            call_skill=_noop,
+            mode_getter=lambda: "strict",
+            list_cron_jobs=lambda: "",
+            run_agent=lambda *_: _noop(),
+            owner_only=lambda _u: True,
+            cmd_cronadd=_noop,
+            cmd_cronlist=_noop,
+            cmd_cronrun=cmd_cronrun,
+            cmd_cronruns=_noop,
+            cmd_status=cmd_status,
+            cmd_health=_noop,
+            cmd_checkup=_noop,
+            cmd_state_check=_noop,
+            cmd_state_repair=_noop,
+            cmd_op_sanity=_noop,
+            cmd_diagnose=_noop,
+            cmd_improve_propose=_noop,
+            cmd_improve_list=_noop,
+            cmd_improve_compile=_noop,
+            cmd_improve_artifacts=_noop,
+            cmd_improve_simulate=_noop,
+            cmd_improve_runs=_noop,
+            cmd_improve_compare=_noop,
+            cmd_improve_policy=_noop,
+            cmd_improve_promote=_noop,
+            cmd_improve_autopromote=_noop,
+            cmd_improve_funnel=_noop,
+            cmd_improve_eval_report=_noop,
+            cmd_improve_weekly_report=_noop,
+            cmd_improve_phase=_noop,
+            cmd_improve_log_rollback=_noop,
+            cmd_evolve_capture=_noop,
+            cmd_evolve_memory=_noop,
+            cmd_panicstatus=_noop,
+            cmd_paniclock=_noop,
+            cmd_panicunlock=_noop,
+            panic_locked=lambda: False,
+            panic_bypass_text=lambda _t: False,
+            command_aliases_getter=lambda: {"statu": "status", "cronru": "cronrun"},
+            op_event=lambda *a, **k: events.append((a, k)),
+            log=SimpleNamespace(exception=lambda *a, **k: None),
+        )
+
+    asyncio.run(run())
+    assert called["status"] == 1
+    assert called["cronrun"] == 1
+    # ensure alias pathway was exercised
+    assert any(args and args[0] == "command_alias_applied" for args, _kwargs in events)

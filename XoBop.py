@@ -22,6 +22,7 @@ This version remains single user by design.
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import math
@@ -59,7 +60,7 @@ from xobop.config import settings
 from xobop.capabilities_shell import exec_shell_command
 from xobop.db import db_session, sqlite_online_backup
 from xobop.migrations import apply_migrations
-from xobop.handlers_runtime import process_media_message, process_text_message
+from xobop.handlers_runtime import process_media_message, process_text_message, resolve_command_alias
 from xobop.bootstrap import build_app, register_handlers
 from xobop.cron_bootstrap import ensure_default_cron_jobs
 from xobop.schema import ensure_core_schema
@@ -175,6 +176,8 @@ _MODE_VISIBILITY_COL: dict[str, str] = {
     "strict": "visible_in_strict",
     "normal": "visible_in_normal",
 }
+
+_COMMAND_DISPATCH: dict[str, Any] = {}
 
 
 @dataclass
@@ -368,11 +371,23 @@ def _get_mode() -> str:
     return _get_setting("mode", "strict") or "strict"
 
 
+def _get_last_applied_artifact_id() -> int:
+    raw = (_get_setting("last_applied_artifact_id", "0") or "0").strip()
+    try:
+        return max(0, int(raw))
+    except Exception:
+        return 0
+
+
+def _set_last_applied_artifact_id(artifact_id: int) -> None:
+    _set_setting("last_applied_artifact_id", str(max(0, int(artifact_id))))
+
+
 def _runtime_state_payload(*, last_applied_artifact_id: Optional[int] = None, last_promotion_mode: str = "") -> dict[str, Any]:
     payload = {
         "command_aliases": _get_command_aliases(),
         "exec_retry_limit": _get_exec_retry_limit(),
-        "last_applied_artifact_id": int(last_applied_artifact_id or 0),
+        "last_applied_artifact_id": int(_get_last_applied_artifact_id() if last_applied_artifact_id is None else last_applied_artifact_id),
         "last_promotion_mode": (last_promotion_mode or ""),
     }
     payload["command_aliases"] = {str(k): str(v) for k, v in sorted(payload["command_aliases"].items())}
@@ -400,7 +415,7 @@ def _state_check_dict() -> dict[str, Any]:
     snap = _load_runtime_snapshot()
     db = _runtime_state_payload()
     mismatched: dict[str, dict[str, Any]] = {}
-    for key in ["command_aliases", "exec_retry_limit"]:
+    for key in ["command_aliases", "exec_retry_limit", "last_applied_artifact_id"]:
         if snap.get(key) != db.get(key):
             mismatched[key] = {"snapshot": snap.get(key), "db": db.get(key)}
     return {
@@ -424,6 +439,10 @@ def _repair_state_from_snapshot() -> str:
         _set_exec_retry_limit(int(retry))
     except Exception:
         _set_exec_retry_limit(0)
+    try:
+        _set_last_applied_artifact_id(int(snap.get("last_applied_artifact_id", 0) or 0))
+    except Exception:
+        _set_last_applied_artifact_id(0)
     return "✅ Runtime settings repaired from snapshot."
 
 
@@ -482,9 +501,86 @@ def _get_eval_phase() -> str:
 
 
 def _allowed_artifact_families() -> set[str]:
-    raw = (_get_setting("artifact_families_allowed", "alias,retry") or "alias,retry").strip().lower()
+    raw = (_get_setting("artifact_families_allowed", "alias,retry,lineage") or "alias,retry,lineage").strip().lower()
     parts = [x.strip() for x in raw.split(",") if x.strip()]
     return set(parts or ["alias", "retry"])
+
+
+def _artifact_contract(artifact_type: str, target: str) -> dict[str, Any]:
+    at = (artifact_type or "").strip()
+    tg = (target or "").strip()
+    if at == "routing_rule" and tg == "unknown_command_handler":
+        base = {
+            "family": "alias",
+            "apply_points": ["command_pre_dispatch", "unknown_command_suggestion"],
+            "invariants": ["alias_applies_before_dispatch"],
+        }
+    elif at == "config_change" and tg == "runtime_retry_policy":
+        base = {
+            "family": "retry",
+            "apply_points": ["runtime_settings"],
+            "invariants": ["retry_limit_in_range"],
+        }
+    elif at == "state_lineage" and tg == "runtime_snapshot":
+        base = {
+            "family": "lineage",
+            "apply_points": ["runtime_settings", "snapshot_export", "startup_reconcile", "state_check"],
+            "invariants": ["snapshot_lineage_nonzero"],
+        }
+    else:
+        return {"family": "unknown", "apply_points": [], "invariants": [], "contract_version": "v0", "contract_hash": ""}
+
+    canonical = json.dumps({
+        "family": base["family"],
+        "apply_points": base["apply_points"],
+        "invariants": base["invariants"],
+        "contract_version": "v1",
+    }, sort_keys=True)
+    base["contract_version"] = "v1"
+    base["contract_hash"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+    return base
+
+
+def _artifact_has_expected_contract(artifact_type: str, target: str, artifact_json: dict[str, Any]) -> tuple[bool, str]:
+    expected = _artifact_contract(artifact_type, target)
+    if expected.get("family") == "unknown":
+        return False, f"unsupported artifact scope: {artifact_type}:{target}"
+    allowed_contract_keys = {"apply_points", "invariants", "contract_version", "contract_hash"}
+    extra_contract_keys = [k for k in artifact_json.keys() if str(k).startswith("contract_") and str(k) not in allowed_contract_keys]
+    if extra_contract_keys:
+        return False, f"unknown contract keys: {','.join(sorted(extra_contract_keys))}"
+    if artifact_json.get("apply_points") != expected.get("apply_points"):
+        return False, "apply_points mismatch"
+    if artifact_json.get("invariants") != expected.get("invariants"):
+        return False, "invariants mismatch"
+    if str(artifact_json.get("contract_version", "")) != str(expected.get("contract_version", "")):
+        return False, "contract_version mismatch"
+    if str(artifact_json.get("contract_hash", "")) != str(expected.get("contract_hash", "")):
+        return False, "contract_hash mismatch"
+    return True, "ok"
+
+
+def _apply_artifact_to_runtime_settings(artifact_type: str, target: str, artifact_json: dict[str, Any]) -> str:
+    atype = (artifact_type or "").strip()
+    t = (target or "").strip()
+    if atype == "routing_rule" and t == "unknown_command_handler":
+        aliases = dict(_get_command_aliases())
+        for k, v in dict((artifact_json or {}).get("add_alias", {})).items():
+            aliases[str(k).strip().lower()] = str(v).strip().lower()
+        _set_command_aliases(aliases)
+        return f"aliases={len(aliases)}"
+    if atype == "config_change" and t == "runtime_retry_policy":
+        key = str((artifact_json or {}).get("key", "")).strip()
+        val = str((artifact_json or {}).get("value", "")).strip()
+        if key != "exec_retry_limit" or (not val.isdigit()):
+            raise ValueError("invalid retry policy payload")
+        _set_exec_retry_limit(int(val))
+        return f"{key}={val}"
+    if atype == "state_lineage" and t == "runtime_snapshot":
+        aid = int((artifact_json or {}).get("artifact_id", 0) or 0)
+        _set_last_applied_artifact_id(aid)
+        return f"last_applied_artifact_id={aid}"
+    raise ValueError(f"unsupported artifact scope: {atype}:{t}")
 
 
 def _get_exec_retry_limit() -> int:
@@ -2530,10 +2626,21 @@ def _compile_proposal_to_change(proposal_id: int) -> str:
             artifact = {"key": "exec_retry_limit", "value": str(new_val)}
             expected_metric = "failure_rate"
             expected_delta = -0.10
+        elif "snapshot lineage" in text or "last_applied_artifact_id" in text or "lineage" in text:
+            artifact_type = "state_lineage"
+            target = "runtime_snapshot"
+            artifact = {"artifact_id": int(_get_last_applied_artifact_id() or 0)}
+            expected_metric = "state_consistency"
+            expected_delta = 0.0
         else:
             return f"⛔ Proposal #{proposal_id} is non-actionable: cannot compile to allowed artifact type."
 
-        family = "alias" if artifact_type == "routing_rule" else ("retry" if artifact_type == "config_change" else "unknown")
+        contract = _artifact_contract(artifact_type, target)
+        artifact["apply_points"] = contract.get("apply_points", [])
+        artifact["invariants"] = contract.get("invariants", [])
+        artifact["contract_version"] = contract.get("contract_version", "")
+        artifact["contract_hash"] = contract.get("contract_hash", "")
+        family = str(contract.get("family", "unknown"))
         if family not in _allowed_artifact_families():
             return f"⛔ Artifact family '{family}' is frozen/disabled by trial scope."
 
@@ -2626,7 +2733,11 @@ def _simulate_proposal_sync(proposal_id: int) -> str:
         ajson = json.loads(art["artifact_json"] or "{}")
         atype = (art["artifact_type"] or "").strip()
         target = (art["target"] or "").strip()
-        if atype == "routing_rule" and target == "unknown_command_handler":
+        c_ok, c_note = _artifact_has_expected_contract(atype, target, (ajson or {}))
+        if not c_ok:
+            art_ok = False
+            art_note = c_note
+        elif atype == "routing_rule" and target == "unknown_command_handler":
             aliases = (ajson or {}).get("add_alias", {})
             art_ok = isinstance(aliases, dict) and all(bool(str(k).strip()) and bool(str(v).strip()) for k, v in aliases.items())
             if not art_ok:
@@ -2637,6 +2748,11 @@ def _simulate_proposal_sync(proposal_id: int) -> str:
             art_ok = (key == "exec_retry_limit") and str(val).isdigit() and (0 <= int(val) <= 3)
             if not art_ok:
                 art_note = "invalid retry policy artifact"
+        elif atype == "state_lineage" and target == "runtime_snapshot":
+            aid = (ajson or {}).get("artifact_id")
+            art_ok = str(aid).isdigit() and int(aid) >= 0
+            if not art_ok:
+                art_note = "invalid lineage artifact"
         else:
             art_ok = False
             art_note = f"unsupported artifact scope: {atype}:{target}"
@@ -3038,78 +3154,81 @@ def _promote_proposal_sync(proposal_id: int, force: bool = False, reason: str = 
     ajson = json.loads(art["artifact_json"] or "{}")
     atype = art["artifact_type"]
     target = art["target"]
-    applied_desc = ""
-    if atype == "routing_rule" and target == "unknown_command_handler":
-        aliases = dict(_get_command_aliases())
-        for k, v in dict((ajson or {}).get("add_alias", {})).items():
-            aliases[str(k).strip().lower()] = str(v).strip().lower()
-        _set_command_aliases(aliases)
-        applied_desc = f"aliases={len(aliases)}"
-    elif atype == "config_change" and target == "runtime_retry_policy":
-        key = str((ajson or {}).get("key", "")).strip()
-        val = str((ajson or {}).get("value", "")).strip()
-        if key != "exec_retry_limit" or (not val.isdigit()):
-            return "⛔ Artifact apply failed: invalid retry policy payload."
-        _set_exec_retry_limit(int(val))
-        applied_desc = f"{key}={val}"
-    else:
-        return f"⛔ Unsupported artifact scope: {atype}:{target}"
+    contract_ok, contract_note = _artifact_has_expected_contract(atype, target, (ajson or {}))
+    if not contract_ok:
+        return f"⛔ Artifact apply failed: {contract_note}."
 
-    # Export deterministic canonical state snapshot after apply
-    _export_runtime_snapshot(last_applied_artifact_id=int(art["id"]), last_promotion_mode=promotion_mode)
-
+    pre_state = _runtime_state_payload(last_promotion_mode="")
     commit_hash = "unknown"
     repo_dir = Path(__file__).resolve().parent
     try:
-        rel_snap = os.path.relpath(str(RUNTIME_SNAPSHOT_FILE), str(repo_dir))
-        subprocess.run(["git", "-C", str(repo_dir), "add", rel_snap], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(
-            ["git", "-C", str(repo_dir), "commit", "-m", f"self-mod: apply artifact #{int(art['id'])} for proposal #{proposal_id}"],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        commit_hash = subprocess.check_output(["git", "-C", str(repo_dir), "rev-parse", "--short", "HEAD"], text=True).strip() or "unknown"
-    except Exception:
-        pass
+        applied_desc = _apply_artifact_to_runtime_settings(atype, target, (ajson or {}))
+        _set_last_applied_artifact_id(int(art["id"]))
+        _export_runtime_snapshot(last_applied_artifact_id=int(art["id"]), last_promotion_mode=promotion_mode)
 
-    if force:
-        _record_op_event(
-            "force_promotion",
-            route="improve_promote",
-            status="ok",
-            metadata={
-                "proposal_id": proposal_id,
-                "artifact_id": int(art["id"]),
-                "reason": (reason or "unspecified"),
-                "eval_phase": phase,
-            },
-        )
+        try:
+            rel_snap = os.path.relpath(str(RUNTIME_SNAPSHOT_FILE), str(repo_dir))
+            subprocess.run(["git", "-C", str(repo_dir), "add", rel_snap], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(
+                ["git", "-C", str(repo_dir), "commit", "-m", f"self-mod: apply artifact #{int(art['id'])} for proposal #{proposal_id}"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            commit_hash = subprocess.check_output(["git", "-C", str(repo_dir), "rev-parse", "--short", "HEAD"], text=True).strip() or "unknown"
+        except Exception:
+            pass
 
-    with get_db() as conn:
-        conn.execute(
-            "UPDATE improvement_proposals SET status='promoted' WHERE id=?",
-            (proposal_id,),
-        )
-        conn.execute(
-            "UPDATE change_artifacts SET status='applied', applied_ts=CURRENT_TIMESTAMP, commit_hash=?, promotion_mode=?, eval_phase=? WHERE id=?",
-            (commit_hash, promotion_mode, phase, int(art["id"])),
-        )
-        conn.execute(
-            """
-            INSERT INTO improvement_runs(proposal_id,phase,status,promotion_mode,eval_phase,reason,before_json,after_json,notes)
-            VALUES(?, 'promotion', 'ok', ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                proposal_id,
-                promotion_mode,
-                phase,
-                (reason or ""),
-                json.dumps({"artifact_id": int(art["id"]), "artifact_type": atype, "target": target}),
-                json.dumps({"applied": applied_desc}),
-                f"policy={policy}; phase={phase}; risk={risk}; force={int(force)}; artifact_id={int(art['id'])}; commit={commit_hash}",
-            ),
-        )
+        if force:
+            _record_op_event(
+                "force_promotion",
+                route="improve_promote",
+                status="ok",
+                metadata={
+                    "proposal_id": proposal_id,
+                    "artifact_id": int(art["id"]),
+                    "reason": (reason or "unspecified"),
+                    "eval_phase": phase,
+                },
+            )
+
+        with get_db() as conn:
+            conn.execute(
+                "UPDATE improvement_proposals SET status='promoted' WHERE id=?",
+                (proposal_id,),
+            )
+            conn.execute(
+                "UPDATE change_artifacts SET status='applied', applied_ts=CURRENT_TIMESTAMP, commit_hash=?, promotion_mode=?, eval_phase=? WHERE id=?",
+                (commit_hash, promotion_mode, phase, int(art["id"])),
+            )
+            conn.execute(
+                """
+                INSERT INTO improvement_runs(proposal_id,phase,status,promotion_mode,eval_phase,reason,before_json,after_json,notes)
+                VALUES(?, 'promotion', 'ok', ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    proposal_id,
+                    promotion_mode,
+                    phase,
+                    (reason or ""),
+                    json.dumps({"artifact_id": int(art["id"]), "artifact_type": atype, "target": target}),
+                    json.dumps({"applied": applied_desc}),
+                    f"policy={policy}; phase={phase}; risk={risk}; force={int(force)}; artifact_id={int(art['id'])}; commit={commit_hash}",
+                ),
+            )
+    except Exception as exc:
+        # best-effort runtime rollback if promotion bookkeeping fails midway
+        try:
+            _set_command_aliases(dict(pre_state.get("command_aliases", {})))
+            _set_exec_retry_limit(int(pre_state.get("exec_retry_limit", 0) or 0))
+            _set_last_applied_artifact_id(int(pre_state.get("last_applied_artifact_id", 0) or 0))
+            _export_runtime_snapshot(
+                last_applied_artifact_id=int(pre_state.get("last_applied_artifact_id", 0) or 0),
+                last_promotion_mode=str(pre_state.get("last_promotion_mode", "") or ""),
+            )
+        except Exception:
+            pass
+        return f"⛔ Promotion failed and runtime state was rolled back: {str(exc)[:200]}"
 
     return f"✅ Proposal #{proposal_id} promoted+applied under policy={policy} risk={risk} artifact={atype}:{target} commit={commit_hash}."
 
@@ -4706,9 +4825,20 @@ async def cmd_unknown(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     text = (update.message.text or "").strip()
     if not text.startswith("/"):
         return
+
+    aliases = _get_command_aliases()
+    rewritten, changed, resolved = resolve_command_alias(text, aliases)
+    if changed and resolved and resolved in _COMMAND_DISPATCH:
+        try:
+            update.message.text = rewritten
+        except Exception:
+            pass
+        _record_op_event("command_alias_applied", chat_id=update.effective_chat.id, command=resolved, metadata={"rewritten": rewritten})
+        await _COMMAND_DISPATCH[resolved](update, ctx)
+        return
+
     cmd = text.split()[0]
     key = cmd.lstrip("/").lower()
-    aliases = _get_command_aliases()
     sug = aliases.get(key)
     _record_op_event("unknown_command", chat_id=update.effective_chat.id, command=cmd, status="error", metadata={"suggested": sug or ""})
     if sug:
@@ -4878,7 +5008,7 @@ def _startup_reconcile_runtime_state() -> None:
     if not snap:
         # No canonical snapshot yet; fall back to legacy file and export a baseline snapshot
         _apply_self_mods_to_runtime()
-        _export_runtime_snapshot(last_applied_artifact_id=0)
+        _export_runtime_snapshot(last_applied_artifact_id=_get_last_applied_artifact_id())
         return
 
     check = _state_check_dict()
@@ -4906,9 +5036,7 @@ def main() -> None:
     )
 
     app = build_app(token=TOKEN, post_init=_post_init, post_shutdown=_post_shutdown)
-    register_handlers(
-        app=app,
-        commands={
+    commands = {
             "remember": cmd_remember,
             "delfact": cmd_delfact,
             "facts": cmd_facts,
@@ -4970,7 +5098,14 @@ def main() -> None:
             "cronoff": cmd_cronoff,
             "cronrun": cmd_cronrun,
             "cronruns": cmd_cronruns,
-        },
+    }
+
+    global _COMMAND_DISPATCH
+    _COMMAND_DISPATCH = dict(commands)
+
+    register_handlers(
+        app=app,
+        commands=commands,
         cmd_unknown=cmd_unknown,
         handle_media_message=handle_media_message,
         handle_message=handle_message,

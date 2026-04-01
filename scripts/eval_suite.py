@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -13,7 +15,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import XoBop as xb
 from xobop.capabilities_shell import exec_shell_command
+from xobop.handlers_runtime import resolve_command_alias
 from xobop.router import classify
 from xobop.shell_facade import LiveShellExecutor, SimShellExecutor
 
@@ -59,6 +63,68 @@ def test_router_basics() -> None:
     assert_true(classify("did you send the email?")["name"] == "email_status", "email_status classification mismatch")
     assert_true(classify("send email to neri saying hi")["name"] == "email_send", "email_send classification mismatch")
     assert_true(classify("git status")["name"] == "direct_shell", "direct_shell classification mismatch")
+
+
+def test_alias_rewrite_basic() -> None:
+    rewritten, changed, resolved = resolve_command_alias("/statu", {"statu": "status", "cronru": "cronrun"})
+    assert_true(changed, "alias rewrite should mark changed")
+    assert_true(resolved == "status", "alias should resolve to status")
+    assert_true(rewritten == "/status", "alias should rewrite to /status")
+
+
+def test_alias_rewrite_with_args() -> None:
+    rewritten, changed, resolved = resolve_command_alias("/cronru load-heartbeat", {"statu": "status", "cronru": "cronrun"})
+    assert_true(changed, "alias+args rewrite should mark changed")
+    assert_true(resolved == "cronrun", "alias should resolve to cronrun")
+    assert_true(rewritten == "/cronrun load-heartbeat", "alias should preserve args")
+
+
+def test_artifact_contract_alias_scope() -> None:
+    c = xb._artifact_contract("routing_rule", "unknown_command_handler")
+    art = {
+        "add_alias": {"statu": "status"},
+        "apply_points": c["apply_points"],
+        "invariants": c["invariants"],
+        "contract_version": c["contract_version"],
+        "contract_hash": c["contract_hash"],
+    }
+    ok, note = xb._artifact_has_expected_contract("routing_rule", "unknown_command_handler", art)
+    assert_true(ok, f"alias artifact contract failed: {note}")
+
+
+def test_snapshot_lineage_last_applied_artifact_id() -> None:
+    store: dict[str, str] = {}
+    original_get = xb._get_setting
+    original_set = xb._set_setting
+    original_alias_getter = xb._get_command_aliases
+    original_retry_getter = xb._get_exec_retry_limit
+    original_snapshot_file = xb.RUNTIME_SNAPSHOT_FILE
+
+    try:
+        xb._get_setting = lambda key, default=None: store.get(key, default)
+        xb._set_setting = lambda key, value: store.__setitem__(key, value)
+        xb._get_command_aliases = lambda: {"statu": "status"}
+        xb._get_exec_retry_limit = lambda: 1
+
+        with tempfile.TemporaryDirectory() as td:
+            snap_path = Path(td) / "runtime_settings_snapshot.json"
+            xb.RUNTIME_SNAPSHOT_FILE = snap_path
+
+            store["last_applied_artifact_id"] = "42"
+            xb._export_runtime_snapshot(last_promotion_mode="policy")
+
+            data = json.loads(snap_path.read_text(encoding="utf-8"))
+            assert_true(int(data.get("last_applied_artifact_id", 0)) == 42, "snapshot last_applied_artifact_id mismatch")
+
+            check = xb._state_check_dict()
+            assert_true(check.get("match") is True, "state_check should match after snapshot export")
+            assert_true(int(check.get("snapshot", {}).get("last_applied_artifact_id", 0)) == 42, "state_check snapshot value mismatch")
+    finally:
+        xb._get_setting = original_get
+        xb._set_setting = original_set
+        xb._get_command_aliases = original_alias_getter
+        xb._get_exec_retry_limit = original_retry_getter
+        xb.RUNTIME_SNAPSHOT_FILE = original_snapshot_file
 
 
 def build_policies() -> dict:
@@ -199,6 +265,10 @@ def main() -> int:
     r = Runner()
 
     r.run("router.classify.basics", test_router_basics)
+    r.run("alias.rewrite.basic", test_alias_rewrite_basic)
+    r.run("alias.rewrite.args", test_alias_rewrite_with_args)
+    r.run("artifact.contract.alias_scope", test_artifact_contract_alias_scope)
+    r.run("snapshot.lineage.last_applied_artifact_id", test_snapshot_lineage_last_applied_artifact_id)
     r.run("shell.hard_block", lambda: asyncio.run(test_shell_hard_block(r)))
     r.run("shell.force_gate", lambda: asyncio.run(test_shell_force_gate(r)))
     r.run("shell.allowlist_block", lambda: asyncio.run(test_shell_allowlist_block(r)))
