@@ -1,0 +1,8 @@
+{
+  "command_aliases": {
+    "cronru": "cronrun",
+    "statu": "status"
+  },
+  "exec_retry_limit": 3,
+  "last_applied_artifact_id": 11
+}

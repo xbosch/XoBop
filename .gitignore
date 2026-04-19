@@ -1,0 +1,55 @@
+# Secrets
+.env
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Runtime state (all under workspace/)
+workspace/
+memory.db
+memory.db-shm
+memory.db-wal
+artifacts/
+backups/
+memory/
+ops-digest/
+outbox/
+*.jpg
+*.jpeg
+*.png
+MEMORY.md
+logs/
+evolution/
+reports/
+state/
+
+# Local junk / accidental dirs
+&&/
+cp/
++%F).db/
+
+# Local dev process helpers / scratch
+start_dev.sh
+stop_dev.sh
+status_dev.sh
+agent-test/
+
+# OS/editor
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/

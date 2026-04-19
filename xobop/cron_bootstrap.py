@@ -1,0 +1,49 @@
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import sqlite3
+
+
+def ensure_default_cron_jobs(conn: sqlite3.Connection, repo_cwd: str) -> None:
+    _backup_dir = os.getenv("BACKUP_DIR", str(Path(repo_cwd) / "workspace" / "backups"))
+    jobs = [
+        (
+            "db-backup-6h",
+            "Online SQLite backup every 6 hours",
+            "0 */6 * * *",
+            "db_backup",
+            json.dumps({"backup_dir": str(Path(_backup_dir).resolve()), "repo_dir": repo_cwd}),
+        ),
+        (
+            "prompt-review-weekly",
+            "Weekly prompt proposal from usage/failure stats",
+            "0 9 * * 1",
+            "prompt_review",
+            "{}",
+        ),
+        (
+            "checkup-monthly",
+            "Monthly environment/dependency check",
+            "0 10 1 * *",
+            "checkup",
+            "{}",
+        ),
+        (
+            "system-map-weekly",
+            "Weekly self-documentation refresh",
+            "30 9 * * 1",
+            "system_map_refresh",
+            "{}",
+        ),
+    ]
+
+    for name, description, cron_expr, skill_type, skill_args in jobs:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO cron_jobs (name,description,cron_expr,skill_type,skill_args,enabled,alert_owner,updated_ts)
+            VALUES (?,?,?,?,?,1,1,CURRENT_TIMESTAMP)
+            """,
+            (name, description, cron_expr, skill_type, skill_args),
+        )
