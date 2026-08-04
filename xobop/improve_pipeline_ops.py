@@ -898,18 +898,27 @@ async def fetch_conditioned_evolution_async(
     if not candidates:
         candidates = list(rows)
 
-    # Score candidates and apply softmax so weights match G matrix equation
+    # Score candidates and apply softmax so weights match G matrix equation.
+    # Similarity is the primary signal; a bounded outcome-quality bonus (from
+    # metric_delta, same sign convention as update_learned_query_vector's EMA
+    # sign: negative delta = fail_rate went down = improvement) nudges proven
+    # priors ahead of neutral/bad ones at comparable similarity, without
+    # letting quality alone override relevance.
     raw_scores = []
     for row in candidates:
         emb_json = row["embedding_json"]
         if emb_json:
             try:
                 entry_emb = json.loads(emb_json)
-                raw_scores.append((_cosine_similarity(query_embedding, entry_emb), row))
+                score = _cosine_similarity(query_embedding, entry_emb)
             except Exception:
-                raw_scores.append((0.0, row))
+                score = 0.0
         else:
-            raw_scores.append((0.0, row))
+            score = 0.0
+        metric_delta = row["metric_delta"]
+        if metric_delta is not None:
+            score += max(-0.3, min(0.3, -float(metric_delta) * 0.3))
+        raw_scores.append((score, row))
 
     # Softmax normalisation (temperature=1, stable via max subtraction)
     if raw_scores:
@@ -969,4 +978,63 @@ async def embed_evolution_entry_async(
         metric_delta=float(row["metric_delta"]) if row["metric_delta"] is not None else None,
         outcome=str(row["outcome"] or ""),
         get_db=get_db,
+    )
+
+
+def run_pipeline_sweep(
+    *,
+    get_db: Callable,
+    compile_proposal_to_change: Callable[[int], str],
+    simulate_proposal_sync: Callable[[int], str],
+    auto_promote_low_sync: Callable[[], str],
+    max_proposals: int = 10,
+) -> str:
+    """Unattended propose->compile->simulate->[auto-]promote sweep for cron use.
+
+    Only acts on proposals that reactive auto-proposing (or /improve_propose)
+    already created; never generates proposals itself. Promotion still goes
+    through auto_promote_low_sync unchanged, so improve_policy/risk/confidence
+    gates are the only thing that can let a change land live.
+    """
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT p.id FROM improvement_proposals p
+            WHERE p.status = 'proposed'
+              AND NOT EXISTS (
+                  SELECT 1 FROM change_artifacts ca
+                  WHERE ca.proposal_id = p.id AND ca.status IN ('sim_pass', 'applied')
+              )
+            ORDER BY p.id ASC
+            LIMIT ?
+            """,
+            (max(1, int(max_proposals)),),
+        ).fetchall()
+
+    compiled = 0
+    compile_skipped = 0
+    simulated_pass = 0
+    simulated_fail = 0
+
+    for r in rows:
+        pid = int(r["id"])
+        compile_msg = compile_proposal_to_change(pid)
+        if compile_msg.startswith("⛔"):
+            compile_skipped += 1
+            continue
+        compiled += 1
+
+        sim_msg = simulate_proposal_sync(pid)
+        first_line = sim_msg.split("\n", 1)[0]
+        if "PASS" in first_line:
+            simulated_pass += 1
+        else:
+            simulated_fail += 1
+
+    promote_summary = auto_promote_low_sync()
+
+    return (
+        f"Pipeline sweep: considered={len(rows)} compiled={compiled} "
+        f"compile_skipped={compile_skipped} sim_pass={simulated_pass} sim_fail={simulated_fail}\n"
+        f"{promote_summary}"
     )

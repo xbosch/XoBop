@@ -28,6 +28,7 @@ class Settings:
     file_memory_root: Path
     long_memory_file: Path
     daily_memory_dir: Path
+    improve_priorities_file: Path
     self_mods_file: Path
     backup_dir: Path
 
@@ -66,6 +67,7 @@ def load_settings() -> Settings:
         file_memory_root=file_memory_root,
         long_memory_file=Path(os.getenv("LONG_MEMORY_FILE", str(file_memory_root / "MEMORY.md"))).resolve(),
         daily_memory_dir=Path(os.getenv("DAILY_MEMORY_DIR", str(file_memory_root / "memory"))).resolve(),
+        improve_priorities_file=Path(os.getenv("IMPROVE_PRIORITIES_FILE", str(project_root / "IMPROVE_PRIORITIES.md"))).resolve(),
         self_mods_file=Path(os.getenv("SELF_MODS_FILE", str(project_root / "config" / "self_mods.json"))).resolve(),
         backup_dir=Path(os.getenv("BACKUP_DIR", str(project_root / "workspace" / "backups"))).resolve(),
     )

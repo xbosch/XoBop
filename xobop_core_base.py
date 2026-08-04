@@ -246,6 +246,7 @@ from xobop.improve_pipeline_ops import (
     lookup_evolution_memory as ipo_lookup_evolution_memory,
     recapture_all_evolution_sync as ipo_recapture_all_evolution_sync,
     recompute_evolution_blocks as ipo_recompute_evolution_blocks,
+    run_pipeline_sweep as ipo_run_pipeline_sweep,
     update_learned_query_vector as ipo_update_learned_query_vector,
     impact_compare_sync as ipo_impact_compare_sync,
     improve_eval_report as ipo_improve_eval_report,
@@ -256,6 +257,7 @@ from xobop.improve_pipeline_ops import (
     latest_run_status as ipo_latest_run_status,
 )
 from xobop.improve_generate import (
+    build_improve_priorities_block as ig_build_improve_priorities_block,
     compile_proposal_to_change as ig_compile_proposal_to_change,
     diagnose_report as ig_diagnose_report,
     diagnose_snapshot as ig_diagnose_snapshot,
@@ -2000,6 +2002,14 @@ async def _run_cron_job(job_name: str) -> None:
                 loop = asyncio.get_running_loop()
                 path = await loop.run_in_executor(None, _generate_system_map_sync)
                 output = f"SYSTEM_MAP refreshed: {path}"
+        elif skill_type == "evolve_blocks_recompute":
+            n_blocks = int(skill_args.get("n_blocks", 4))
+            written = await ipo_recompute_evolution_blocks(get_db=get_db, n_blocks=n_blocks)
+            output = f"Evolution memory blocks recomputed: {written} block(s) written."
+        elif skill_type == "improve_pipeline_sweep":
+            max_proposals = int(skill_args.get("max_proposals", 10))
+            loop = asyncio.get_running_loop()
+            output = await loop.run_in_executor(None, lambda: _run_pipeline_sweep(max_proposals=max_proposals))
         else:
             raise ValueError(f"Unknown cron skill_type: {skill_type}")
     except Exception as exc:

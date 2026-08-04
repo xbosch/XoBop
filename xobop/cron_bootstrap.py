@@ -37,6 +37,13 @@ def ensure_default_cron_jobs(conn: sqlite3.Connection, repo_cwd: str) -> None:
             "system_map_refresh",
             "{}",
         ),
+        (
+            "improve-pipeline-sweep-nightly",
+            "Nightly compile+simulate+auto-promote sweep over pending proposals",
+            "0 3 * * *",
+            "improve_pipeline_sweep",
+            json.dumps({"max_proposals": 10}),
+        ),
     ]
 
     for name, description, cron_expr, skill_type, skill_args in jobs:

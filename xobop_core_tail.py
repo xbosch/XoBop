@@ -345,8 +345,11 @@ async def _generate_improvement_proposal(days: int = 7, conditioned_rows=None) -
             llm_proposal_fn=_llm_proposal_complete,
             allowed_families_fn=lambda: sorted(_allowed_artifact_families()),
             conditioned_evolution_rows=conditioned_rows,
+            priorities_text=_build_improve_priorities_block(),
         )
     )
+def _build_improve_priorities_block() -> str:
+    return ig_build_improve_priorities_block(settings.improve_priorities_file)
 def _latest_artifact_for_proposal(proposal_id: int) -> Optional[sqlite3.Row]:
     with get_db() as conn:
         row = conn.execute(
@@ -851,6 +854,24 @@ def _promote_proposal_sync(proposal_id: int, force: bool = False, reason: str = 
 
 def _auto_promote_low_sync() -> str:
     return ipo_auto_promote_low_sync(get_improve_policy=_get_improve_policy, get_db=get_db, promote_proposal_sync=_promote_proposal_sync)
+def _run_pipeline_sweep(max_proposals: int = 10) -> str:
+    return ipo_run_pipeline_sweep(
+        get_db=get_db,
+        compile_proposal_to_change=_compile_proposal_to_change,
+        simulate_proposal_sync=_simulate_proposal_sync,
+        auto_promote_low_sync=_auto_promote_low_sync,
+        max_proposals=max_proposals,
+    )
+
+# xobop_core_base.py functions (e.g. the auto-improve tick handler and
+# _run_cron_job) are defined with base's own module globals, so they can't
+# see names defined only here in tail. Inject the callables base needs to
+# invoke back into base's namespace. Without this, _promote_proposal_sync
+# was already unreachable from the auto-improve autopromote branch
+# (xobop_core_base.py's "if autopromote_enabled" block) -- it always
+# NameError'd and was silently swallowed by that block's try/except.
+_base._promote_proposal_sync = _promote_proposal_sync
+_base._run_pipeline_sweep = _run_pipeline_sweep
 def _capture_evolution_memory_sync(proposal_id: int) -> str:
     return ipo_capture_evolution_memory_sync(proposal_id=proposal_id, get_db=get_db)
 def _recapture_all_evolution_sync() -> str:

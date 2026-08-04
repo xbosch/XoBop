@@ -3,10 +3,24 @@ from __future__ import annotations
 import json
 import re
 from collections import defaultdict
+from pathlib import Path
 from statistics import median
 from typing import Any, Callable
 
 TESTER_NOISE_COMMANDS: frozenset[str] = frozenset({"/unknowncommand"})
+
+
+def build_improve_priorities_block(priorities_file: Path) -> str:
+    """Read the human-edited steering doc for /improve_propose, if present.
+
+    Mirrors build_file_memory_block_impl's shape (xobop/core_memory_runtime.py)
+    so proposal generation can be steered the same way chat replies are
+    steered by MEMORY.md, without inventing a new file-reading convention.
+    """
+    if not priorities_file.exists():
+        return ""
+    txt = priorities_file.read_text(encoding="utf-8", errors="ignore").strip()
+    return txt[:2000] if txt else ""
 
 
 def _backfill_op_signals_daily(*, get_db: Callable, days: int) -> None:
@@ -231,7 +245,7 @@ def diagnose_snapshot(*, days: int, get_db: Callable) -> dict[str, Any]:
     }
 
 
-def llm_artifact_proposal_from_diagnosis(*, diagnosis_report: str, allowed_families: list[str], llm_complete: Callable[[str], str]) -> dict[str, Any] | None:
+def llm_artifact_proposal_from_diagnosis(*, diagnosis_report: str, allowed_families: list[str], llm_complete: Callable[[str], str], prior_context: str = "", priorities_text: str = "") -> dict[str, Any] | None:
     """Opt-in LLM proposal path.
 
     Expects model to return JSON object with keys:
@@ -243,7 +257,9 @@ def llm_artifact_proposal_from_diagnosis(*, diagnosis_report: str, allowed_famil
         "Use only these artifact families: " + ", ".join(allowed) + ". "
         "Return strict JSON with keys: title, problem, cause, change, benefit, metric, risk, artifact_family. "
         "risk must be one of: low, medium, high. Keep concise and concrete.\n\n"
-        "Diagnosis report:\n" + diagnosis_report
+        + (f"Current priorities (from human-edited steering doc):\n{priorities_text}\n\n" if priorities_text else "")
+        + (f"Prior outcomes for similar failures:\n{prior_context}\n\n" if prior_context else "")
+        + "Diagnosis report:\n" + diagnosis_report
     )
     try:
         raw = llm_complete(prompt)
@@ -266,7 +282,7 @@ def _diagnosis_contains(diagnosis_text: str, *terms: str) -> bool:
     return any(x.lower() in t for x in terms)
 
 
-def generate_improvement_proposal(*, days: int, get_db: Callable, diagnose_report_fn: Callable[[int], str], llm_proposal_fn: Callable[[str], str] | None = None, allowed_families_fn: Callable[[], list[str]] | None = None, lookup_evolution_fn: Callable[[str, str], list[dict]] | None = None, conditioned_evolution_rows: list[dict] | None = None) -> tuple[int, str]:
+def generate_improvement_proposal(*, days: int, get_db: Callable, diagnose_report_fn: Callable[[int], str], llm_proposal_fn: Callable[[str], str] | None = None, allowed_families_fn: Callable[[], list[str]] | None = None, lookup_evolution_fn: Callable[[str, str], list[dict]] | None = None, conditioned_evolution_rows: list[dict] | None = None, priorities_text: str = "") -> tuple[int, str]:
     d = max(1, min(days, 30))
     diagnosis_text = diagnose_report_fn(d)
     risk = "low"
@@ -310,6 +326,17 @@ def generate_improvement_proposal(*, days: int, get_db: Callable, diagnose_repor
         ).fetchone()["n"]
         p95 = conn.execute("SELECT COALESCE(MAX(p95_latency_ms),0) AS p95 FROM op_signals_daily WHERE day >= date('now', ?)", (f"-{d} day",)).fetchone()["p95"]
 
+        # Render conditioned evolution-memory priors (if the caller pre-fetched
+        # them) so the LLM path actually sees past outcomes, not just the
+        # heuristic fallback path.
+        _llm_prior_context = ""
+        if conditioned_evolution_rows:
+            _lines = []
+            for _p in conditioned_evolution_rows[:3]:
+                _delta_str = f", Δfail_rate={_p['metric_delta']:+.2f}pp" if _p.get("metric_delta") is not None else ""
+                _lines.append(f"- {_p.get('artifact_family','?')} on '{_p.get('target_route') or 'unknown'}' ({_p.get('outcome','?')}{_delta_str}): {_p.get('lesson','')}")
+            _llm_prior_context = "\n".join(_lines)
+
         # Opt-in LLM path: if callback provided, let model propose a concrete artifact-facing plan.
         llm_used = False
         if llm_proposal_fn and allowed_families_fn:
@@ -317,6 +344,8 @@ def generate_improvement_proposal(*, days: int, get_db: Callable, diagnose_repor
                 diagnosis_report=diagnosis_text,
                 allowed_families=allowed_families_fn(),
                 llm_complete=llm_proposal_fn,
+                prior_context=_llm_prior_context,
+                priorities_text=priorities_text,
             )
             if llm_obj:
                 llm_used = True
@@ -345,10 +374,12 @@ def generate_improvement_proposal(*, days: int, get_db: Callable, diagnose_repor
 
         # Check evolution memory for prior successful responses to the same failure class.
         # conditioned_evolution_rows (pre-scored by diagnosis embedding) takes precedence.
+        # Surfaced in the output note regardless of path (LLM or heuristic) so priors
+        # are never silently discarded once the LLM path succeeds.
         _prior_note = ""
-        if conditioned_evolution_rows is not None and not llm_used:
+        if conditioned_evolution_rows is not None:
             _priors = conditioned_evolution_rows
-        elif lookup_evolution_fn and not llm_used:
+        elif lookup_evolution_fn:
             _priors = lookup_evolution_fn(_failure_class, _target_route)
         else:
             _priors = []
