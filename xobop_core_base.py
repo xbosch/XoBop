@@ -349,7 +349,7 @@ MAX_BROWSE_BYTES = 2_000_000
 MAX_READ_BYTES = 2_000_000
 CRON_MAX_OUTPUT_CHARS = 3_000
 MAX_CRONRUNS_LIMIT = 50
-MAX_MEMORY_RESULTS = 5
+MAX_MEMORY_RESULTS = 15
 MAX_MEMORY_ITEMS = 5_000
 MAX_MEMORY_TEXT = 2_000
 MAX_HEALTH_ERRORS = 50
@@ -1370,7 +1370,7 @@ def _retrieve_memory_lexical(query: str, k: int = MAX_MEMORY_RESULTS) -> list[Me
         LIMIT ?
     """
     with get_db() as conn:
-        rows = conn.execute(sql, (match_q, max(1, min(k, MAX_MEMORY_RESULTS)))).fetchall()
+        rows = conn.execute(sql, (match_q, max(1, k))).fetchall()
         ids = [int(r["id"]) for r in rows]
         if ids:
             conn.executemany(
@@ -1416,7 +1416,7 @@ async def _retrieve_memory(query: str, k: int = MAX_MEMORY_RESULTS) -> list[Memo
         )
         scored.append((score, item))
     scored.sort(key=lambda x: x[0], reverse=True)
-    top = [item for _score, item in scored[: max(1, min(k, MAX_MEMORY_RESULTS))]]
+    top = [item for _score, item in scored[: max(1, k)]]
     ids = [item.id for item in top]
     if ids:
         with get_db() as conn:
@@ -1592,6 +1592,29 @@ def _build_structured_memory_block(query: str) -> str:
     return ("\n\n" + "\n\n".join(parts)) if parts else ""
 
 
+def _build_evolution_lesson_block(limit: int = 5) -> str:
+    """Pull recent promoted evolution lessons into the runtime context."""
+    try:
+        with get_db() as conn:
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(evolution_memory)").fetchall()}
+            if not cols:
+                return ""
+            extra = ",failure_class" if "failure_class" in cols else ""
+            rows = conn.execute(
+                f"SELECT lesson{extra} FROM evolution_memory WHERE outcome='promoted' ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+    except Exception:
+        return ""
+    if not rows:
+        return ""
+    lines = []
+    for r in rows:
+        fc = r["failure_class"] if "failure_class" in r.keys() else "general"
+        lines.append(f"- [{fc or 'general'}] {r['lesson']}")
+    return "\n\nPast lessons (apply when relevant):\n" + "\n".join(lines)
+
+
 def _memory_item_is_prompt_polluting(text: str, query: str) -> bool:
     t = (text or "").lower()
     q = (query or "").lower()
@@ -1621,7 +1644,8 @@ async def _build_memory_block(query: str, k: int = MAX_MEMORY_RESULTS) -> str:
         pass
 
     file_block = _build_file_memory_block()
-    return _build_structured_memory_block(query) + sem_block + file_block
+    evolution_block = _build_evolution_lesson_block()
+    return _build_structured_memory_block(query) + sem_block + file_block + evolution_block
 
 
 # =============================================================================

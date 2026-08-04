@@ -7,6 +7,28 @@ from typing import Any, Callable, Awaitable
 
 from openai import RateLimitError
 
+_ERROR_PATTERNS: list[tuple[str, str]] = [
+    ("permission denied", "permission_denied — ask user; do not retry same command"),
+    ("operation not permitted", "permission_denied — ask user; do not retry same command"),
+    ("blocked by policy", "policy_block — action not allowed; suggest a compliant alternative"),
+    ("blocked: write outside", "policy_block — write outside allowed root; use allowed write root"),
+    ("rate limit", "rate_limited — wait before retrying"),
+    ("no such file", "not_found — verify path exists before retrying"),
+    ("not found", "not_found — verify path or resource before retrying"),
+    ("timed out", "timeout — operation too slow; try a simpler command or smaller scope"),
+    ("timeout", "timeout — operation too slow; try a simpler command or smaller scope"),
+    ("connection refused", "network_error — service may be down; check connectivity"),
+]
+
+
+def _classify_tool_result(result: str) -> str:
+    """Prefix failing tool results with a structured error tag the LLM can act on."""
+    rl = (result or "").lower()
+    for pattern, label in _ERROR_PATTERNS:
+        if pattern in rl:
+            return f"[ERR:{label}]\n{result}"
+    return result
+
 _PENDING_BG_TASKS: set[asyncio.Task] = set()
 
 
@@ -65,7 +87,7 @@ async def run_agent_loop(
 
     prev_user = [m.get("content", "") for m in hist if m.get("role") == "user"][-3:]
     memory_query = "\n".join([*prev_user, query])
-    memory_block = await deps.build_memory_block(memory_query, k=min(3, max_memory_results))
+    memory_block = await deps.build_memory_block(memory_query, k=max_memory_results)
 
     tools = deps.build_tools_from_db(mode)
 
@@ -158,6 +180,7 @@ async def run_agent_loop(
                 log.warning("Tool call %s had bad JSON args: %s", tool_name, exc)
             else:
                 result = await deps.call_skill(chat_id, effective_query, mode, tool_name, tool_args)
+                result = _classify_tool_result(result)
 
             if chat_id != 0:
                 loop = asyncio.get_running_loop()
