@@ -1809,13 +1809,135 @@ def _startup_reconcile_runtime_state() -> None:
     )
 
 
-# See the _promote_proposal_sync/_run_pipeline_sweep injection above: same
-# fix, for the three remaining tail-only names _run_cron_job's dispatch
-# chain calls. Placed here (after every module-level def) rather than
-# earlier in the file, since these three are defined later than that block.
-_base._run_agent = _run_agent
-_base._run_checkup_sync = _run_checkup_sync
-_base._generate_system_map_sync = _generate_system_map_sync
+# =============================================================================
+# Cron skill_type dispatch table
+#
+# _run_cron_job lives in xobop_core_base.py, but several skill_types need
+# names that only exist in this module's namespace (xobop_core_tail.py has
+# full visibility into both, since it copies base's globals into itself at
+# import time -- base never gets the reverse). Building the dispatch table
+# here and injecting it into base, instead of an if/elif chain living in
+# base itself, is what previously let _run_agent/_run_checkup_sync/
+# _generate_system_map_sync/_promote_proposal_sync/_run_pipeline_sweep
+# silently NameError for months: each new skill_type had to be manually
+# checked for tail-only names. A dict built where every name is guaranteed
+# resolvable removes that failure mode structurally.
+# =============================================================================
+
+
+async def _cron_handle_agent(job_name: str, skill_args: dict) -> str:
+    query = skill_args.get("query", f"Run cron job: {job_name}")
+    return await _run_agent(chat_id=0, query=query, force=True)
+
+
+def _make_cron_skill_call_handler(skill_name: str):
+    async def _handler(job_name: str, skill_args: dict) -> str:
+        return await _call_skill(
+            chat_id=0, user_query=f"cron:{job_name} force", mode="normal",
+            skill_name=skill_name, args=skill_args,
+        )
+    return _handler
+
+
+async def _cron_handle_memory_cleanup(job_name: str, skill_args: dict) -> str:
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _prune_memory_sync)
+    return "Memory cleanup completed."
+
+
+async def _cron_handle_db_backup(job_name: str, skill_args: dict) -> str:
+    backup_dir = skill_args.get("backup_dir", str(settings.backup_dir))
+    repo_dir = skill_args.get("repo_dir", os.getcwd())
+    loop = asyncio.get_running_loop()
+    dst = await loop.run_in_executor(None, lambda: sqlite_online_backup(DB_FILE, backup_dir, repo_dir=repo_dir))
+    return f"DB backup completed: {dst}"
+
+
+async def _cron_handle_prompt_review(job_name: str, skill_args: dict) -> str:
+    if not _overseer_enabled():
+        return "Skipped prompt_review (overseer mode disabled)."
+    with get_db() as conn:
+        top = conn.execute("SELECT skill_name,call_count,error_count FROM skill_usage_stats ORDER BY error_count DESC, call_count DESC LIMIT 8").fetchall()
+        recent = conn.execute("SELECT tool_name,status,result FROM runs ORDER BY id DESC LIMIT 30").fetchall()
+    payload = {
+        "top_skills": [dict(r) for r in top],
+        "recent_runs": [dict(r) for r in recent],
+    }
+    resp = await client.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": "Given skill usage and failures, propose a concise strict prompt improvement. Keep under 120 words."},
+            {"role": "user", "content": json.dumps(payload)[:5000]},
+        ],
+        temperature=0.1,
+        max_tokens=220,
+    )
+    proposal = (resp.choices[0].message.content or "").strip()
+    global _prompt_proposal
+    _prompt_proposal = {"mode": "strict", "text": proposal}
+    return "Prompt proposal generated and staged. Use /promptapprove or /promptreject."
+
+
+async def _cron_handle_checkup(job_name: str, skill_args: dict) -> str:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _run_checkup_sync)
+
+
+async def _cron_handle_system_map_refresh(job_name: str, skill_args: dict) -> str:
+    if not _overseer_enabled():
+        return "Skipped system_map_refresh (overseer mode disabled)."
+    loop = asyncio.get_running_loop()
+    path = await loop.run_in_executor(None, _generate_system_map_sync)
+    return f"SYSTEM_MAP refreshed: {path}"
+
+
+async def _cron_handle_evolve_blocks_recompute(job_name: str, skill_args: dict) -> str:
+    n_blocks = int(skill_args.get("n_blocks", 4))
+    written = await ipo_recompute_evolution_blocks(get_db=get_db, n_blocks=n_blocks)
+    return f"Evolution memory blocks recomputed: {written} block(s) written."
+
+
+async def _cron_handle_improve_pipeline_sweep(job_name: str, skill_args: dict) -> str:
+    max_proposals = int(skill_args.get("max_proposals", 10))
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, lambda: _run_pipeline_sweep(max_proposals=max_proposals))
+
+
+async def _cron_handle_reminders_check(job_name: str, skill_args: dict) -> str:
+    return await ro_check_due_reminders(get_db=get_db, notify_owner=_notify_owner, utcnow=datetime.utcnow)
+
+
+async def _cron_handle_daily_digest(job_name: str, skill_args: dict) -> str:
+    loop = asyncio.get_running_loop()
+    digest = await loop.run_in_executor(None, lambda: do_build_daily_digest(get_db=get_db))
+    if digest:
+        await _notify_owner(digest)
+    return digest or "Nothing to report."
+
+
+async def _cron_handle_notify(job_name: str, skill_args: dict) -> str:
+    text = skill_args.get("text", "")
+    await _notify_owner(f"⏰ Reminder: {text}")
+    return "Notified owner."
+
+
+_cron_skill_handlers: dict = {
+    "agent": _cron_handle_agent,
+    "memory_cleanup": _cron_handle_memory_cleanup,
+    "db_backup": _cron_handle_db_backup,
+    "prompt_review": _cron_handle_prompt_review,
+    "checkup": _cron_handle_checkup,
+    "system_map_refresh": _cron_handle_system_map_refresh,
+    "evolve_blocks_recompute": _cron_handle_evolve_blocks_recompute,
+    "improve_pipeline_sweep": _cron_handle_improve_pipeline_sweep,
+    "reminders_check": _cron_handle_reminders_check,
+    "daily_digest": _cron_handle_daily_digest,
+    "notify": _cron_handle_notify,
+}
+for _st in ("run_shell", "browse_page", "read_file", "write_file", "append_file"):
+    _cron_skill_handlers[_st] = _make_cron_skill_call_handler(_st)
+
+_base._cron_skill_handlers = _cron_skill_handlers
 
 
 def main() -> None:

@@ -2049,83 +2049,10 @@ async def _run_cron_job(job_name: str) -> None:
     status = "ok"
 
     try:
-        if skill_type == "agent":
-            query = skill_args.get("query", f"Run cron job: {job_name}")
-            output = await _run_agent(chat_id=0, query=query, force=True)
-        elif skill_type in ("run_shell", "browse_page", "read_file", "write_file", "append_file"):
-            output = await _call_skill(
-                chat_id=0,
-                user_query=f"cron:{job_name} force",
-                mode="normal",
-                skill_name=skill_type,
-                args=skill_args,
-            )
-        elif skill_type == "memory_cleanup":
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, _prune_memory_sync)
-            output = "Memory cleanup completed."
-        elif skill_type == "db_backup":
-            backup_dir = skill_args.get("backup_dir", str(settings.backup_dir))
-            repo_dir = skill_args.get("repo_dir", os.getcwd())
-            loop = asyncio.get_running_loop()
-            dst = await loop.run_in_executor(None, lambda: sqlite_online_backup(DB_FILE, backup_dir, repo_dir=repo_dir))
-            output = f"DB backup completed: {dst}"
-        elif skill_type == "prompt_review":
-            if not _overseer_enabled():
-                output = "Skipped prompt_review (overseer mode disabled)."
-            else:
-                with get_db() as conn:
-                    top = conn.execute("SELECT skill_name,call_count,error_count FROM skill_usage_stats ORDER BY error_count DESC, call_count DESC LIMIT 8").fetchall()
-                    recent = conn.execute("SELECT tool_name,status,result FROM runs ORDER BY id DESC LIMIT 30").fetchall()
-                payload = {
-                    "top_skills": [dict(r) for r in top],
-                    "recent_runs": [dict(r) for r in recent],
-                }
-                resp = await client.chat.completions.create(
-                    model=MODEL,
-                    messages=[
-                        {"role": "system", "content": "Given skill usage and failures, propose a concise strict prompt improvement. Keep under 120 words."},
-                        {"role": "user", "content": json.dumps(payload)[:5000]},
-                    ],
-                    temperature=0.1,
-                    max_tokens=220,
-                )
-                proposal = (resp.choices[0].message.content or "").strip()
-                global _prompt_proposal
-                _prompt_proposal = {"mode": "strict", "text": proposal}
-                output = "Prompt proposal generated and staged. Use /promptapprove or /promptreject."
-        elif skill_type == "checkup":
-            loop = asyncio.get_running_loop()
-            output = await loop.run_in_executor(None, _run_checkup_sync)
-        elif skill_type == "system_map_refresh":
-            if not _overseer_enabled():
-                output = "Skipped system_map_refresh (overseer mode disabled)."
-            else:
-                loop = asyncio.get_running_loop()
-                path = await loop.run_in_executor(None, _generate_system_map_sync)
-                output = f"SYSTEM_MAP refreshed: {path}"
-        elif skill_type == "evolve_blocks_recompute":
-            n_blocks = int(skill_args.get("n_blocks", 4))
-            written = await ipo_recompute_evolution_blocks(get_db=get_db, n_blocks=n_blocks)
-            output = f"Evolution memory blocks recomputed: {written} block(s) written."
-        elif skill_type == "improve_pipeline_sweep":
-            max_proposals = int(skill_args.get("max_proposals", 10))
-            loop = asyncio.get_running_loop()
-            output = await loop.run_in_executor(None, lambda: _run_pipeline_sweep(max_proposals=max_proposals))
-        elif skill_type == "reminders_check":
-            output = await ro_check_due_reminders(get_db=get_db, notify_owner=_notify_owner, utcnow=datetime.utcnow)
-        elif skill_type == "daily_digest":
-            loop = asyncio.get_running_loop()
-            digest = await loop.run_in_executor(None, lambda: do_build_daily_digest(get_db=get_db))
-            if digest:
-                await _notify_owner(digest)
-            output = digest or "Nothing to report."
-        elif skill_type == "notify":
-            text = skill_args.get("text", "")
-            await _notify_owner(f"⏰ Reminder: {text}")
-            output = "Notified owner."
-        else:
+        handler = _cron_skill_handlers.get(skill_type)
+        if handler is None:
             raise ValueError(f"Unknown cron skill_type: {skill_type}")
+        output = await handler(job_name, skill_args)
     except Exception as exc:
         log.exception("Cron job %s failed", job_name)
         error = str(exc)
