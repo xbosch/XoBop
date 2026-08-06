@@ -5,6 +5,8 @@ import math
 import re
 from typing import Any, Callable, Optional
 
+from xobop.text_math import cosine as tm_cosine
+
 
 def impact_compare_sync(*, proposal_id: int, window_days: int, get_db: Callable, get_eval_phase: Callable[[], str]) -> str:
     w = max(1, min(window_days, 30))
@@ -616,10 +618,7 @@ def improve_eval_report(*, days: int, get_db: Callable, get_eval_phase: Callable
 # ---------------------------------------------------------------------------
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(x * x for x in b))
-    return dot / (na * nb) if na and nb else 0.0
+    return tm_cosine(a, b)
 
 
 # ---------------------------------------------------------------------------
