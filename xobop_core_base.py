@@ -366,6 +366,12 @@ MAX_MEMORY_RESULTS = 15
 MAX_MEMORY_ITEMS = 5_000
 MAX_MEMORY_TEXT = 2_000
 MEMORY_DEDUP_THRESHOLD = 0.92
+# Serializes _add_memory's check-then-write dedup section. Without this,
+# two coroutines racing on near-duplicate text (e.g. rapid-fire auto-capture
+# from two quick messages) can both await _embed_text (network I/O, yields
+# the event loop), both see no existing duplicate, and both insert --
+# defeating the dedup gate under its most common trigger.
+_memory_write_lock = asyncio.Lock()
 MAX_REMINDER_TEXT = 3_500  # headroom under Telegram's 4096-char message cap for the "⏰ Reminder: " prefix
 REMINDER_MAX_ATTEMPTS = 5
 MAX_HEALTH_ERRORS = 50
@@ -1329,19 +1335,20 @@ async def _add_memory(text: str, mem_type: str = "note", importance: float = 0.6
     embedding, model_name = await _embed_text(clean_text)
 
     loop = asyncio.get_running_loop()
-    dup_id = await loop.run_in_executor(None, lambda: _find_duplicate_memory_sync(embedding))
-    if dup_id is not None:
-        with get_db() as conn:
-            conn.execute(
-                "UPDATE memory_items SET importance=MIN(1.0, MAX(importance, ?)), pinned=MAX(pinned, ?), "
-                "access_count=access_count+1, last_access_ts=CURRENT_TIMESTAMP WHERE id=?",
-                (importance, 1 if pinned else 0, dup_id),
-            )
-        return dup_id
+    async with _memory_write_lock:
+        dup_id = await loop.run_in_executor(None, lambda: _find_duplicate_memory_sync(embedding))
+        if dup_id is not None:
+            with get_db() as conn:
+                conn.execute(
+                    "UPDATE memory_items SET importance=MIN(1.0, MAX(importance, ?)), pinned=MAX(pinned, ?), "
+                    "access_count=access_count+1, last_access_ts=CURRENT_TIMESTAMP WHERE id=?",
+                    (importance, 1 if pinned else 0, dup_id),
+                )
+            return dup_id
 
-    memory_id = _insert_memory_item_sync(clean_text, mem_type, importance, source, pinned)
-    await loop.run_in_executor(None, lambda: _save_memory_vector_sync(memory_id, embedding, model_name))
-    return memory_id
+        memory_id = _insert_memory_item_sync(clean_text, mem_type, importance, source, pinned)
+        await loop.run_in_executor(None, lambda: _save_memory_vector_sync(memory_id, embedding, model_name))
+        return memory_id
 
 
 MEMDEDUP_MIN_THRESHOLD = 0.5
