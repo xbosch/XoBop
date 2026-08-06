@@ -6,6 +6,8 @@ for _k, _v in vars(_base).items():
         continue
     globals()[_k] = _v
 
+import subprocess
+
 from telegram import Update
 from telegram.ext import Application, ContextTypes
 
@@ -420,22 +422,8 @@ def _build_shell_replay_diff(*, proposal_id: int, artifact: dict, replay_results
     }
 
 
-def _simulate_proposal_sync(proposal_id: int) -> str:
-    import subprocess
-
-    code_path = Path(__file__).resolve()
-    repo = code_path.parent
-    py = (repo / ".venv" / "bin" / "python")
-    if not py.exists():
-        py = Path(sys.executable)
-
-    checks: list[tuple[str, bool, str]] = []
-
-    art = _latest_artifact_for_proposal(proposal_id)
-    if not art:
-        return "⛔ No compiled artifact for this proposal. Run /improve_compile <proposal_id> first."
-
-    # 0) artifact validation gate (typed, safe scope)
+def _sim_check_artifact_validation(art: sqlite3.Row) -> tuple[str, bool, str]:
+    """Typed, safe-scope validation of the compiled artifact's JSON shape."""
     art_ok = True
     art_note = "ok"
     try:
@@ -482,9 +470,10 @@ def _simulate_proposal_sync(proposal_id: int) -> str:
     except Exception as exc:
         art_ok = False
         art_note = str(exc)[:300]
-    checks.append(("artifact_validation", art_ok, art_note))
+    return ("artifact_validation", art_ok, art_note)
 
-    # 1) compile gate
+
+def _sim_check_compile(repo: Path, py: Path) -> tuple[str, bool, str]:
     try:
         proc = subprocess.run(
             [str(py), "-m", "py_compile", "XoBop.py"],
@@ -495,11 +484,12 @@ def _simulate_proposal_sync(proposal_id: int) -> str:
         )
         ok = proc.returncode == 0
         note = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()[:300]
-        checks.append(("compile", ok, note or "ok"))
+        return ("compile", ok, note or "ok")
     except Exception as exc:
-        checks.append(("compile", False, str(exc)[:300]))
+        return ("compile", False, str(exc)[:300])
 
-    # 2) deterministic eval suite gate
+
+def _sim_check_eval_suite(repo: Path, py: Path) -> tuple[str, bool, str]:
     try:
         proc = subprocess.run(
             [str(py), "scripts/eval_suite.py"],
@@ -510,11 +500,12 @@ def _simulate_proposal_sync(proposal_id: int) -> str:
         )
         out = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
         ok = proc.returncode == 0 and ("RESULT: PASS" in out)
-        checks.append(("eval_suite", ok, out[-300:] if out else "ok"))
+        return ("eval_suite", ok, out[-300:] if out else "ok")
     except Exception as exc:
-        checks.append(("eval_suite", False, str(exc)[:300]))
+        return ("eval_suite", False, str(exc)[:300])
 
-    # 3) regression replay (router deterministic samples)
+
+def _sim_check_replay_regression() -> tuple[str, bool, str]:
     replay_ok = True
     replay_note = "ok"
     try:
@@ -535,85 +526,123 @@ def _simulate_proposal_sync(proposal_id: int) -> str:
     except Exception as exc:
         replay_ok = False
         replay_note = str(exc)[:300]
-    checks.append(("replay_regression", replay_ok, replay_note))
+    return ("replay_regression", replay_ok, replay_note)
 
-    # 4) prompt golden replay gate for prompt artifacts
-    if (art["artifact_type"] or "") == "prompt_change" and (art["target"] or "") == "runtime_prompt":
-        prompt_ok = True
-        prompt_note = "ok"
-        try:
-            pj = json.loads(art["artifact_json"] or "{}")
-            ptxt = str((pj or {}).get("value", ""))
-            golden_prompt_checks = [
-                ("contains safety", "safety" in ptxt.lower() or "safe" in ptxt.lower()),
-                ("contains tool guidance", "tool" in ptxt.lower()),
-                ("non-empty", len(ptxt.strip()) >= 40),
-            ]
-            bad = [name for name, ok in golden_prompt_checks if not ok]
-            if bad:
-                prompt_ok = False
-                prompt_note = "missing: " + ", ".join(bad)
-        except Exception as exc:
+
+def _sim_check_prompt_golden_replay(art: sqlite3.Row) -> Optional[tuple[str, bool, str]]:
+    if (art["artifact_type"] or "") != "prompt_change" or (art["target"] or "") != "runtime_prompt":
+        return None
+    prompt_ok = True
+    prompt_note = "ok"
+    try:
+        pj = json.loads(art["artifact_json"] or "{}")
+        ptxt = str((pj or {}).get("value", ""))
+        golden_prompt_checks = [
+            ("contains safety", "safety" in ptxt.lower() or "safe" in ptxt.lower()),
+            ("contains tool guidance", "tool" in ptxt.lower()),
+            ("non-empty", len(ptxt.strip()) >= 40),
+        ]
+        bad = [name for name, ok in golden_prompt_checks if not ok]
+        if bad:
             prompt_ok = False
-            prompt_note = str(exc)[:300]
-        checks.append(("prompt_golden_replay", prompt_ok, prompt_note))
+            prompt_note = "missing: " + ", ".join(bad)
+    except Exception as exc:
+        prompt_ok = False
+        prompt_note = str(exc)[:300]
+    return ("prompt_golden_replay", prompt_ok, prompt_note)
 
-    # 5) skill-policy simulation cases for skill_policy artifacts
-    if (art["artifact_type"] or "") == "skill_policy_change" and (art["target"] or "") == "runtime_skill_config":
-        sp_ok = True
-        sp_note = "ok"
-        try:
-            pj = json.loads(art["artifact_json"] or "{}")
-            bad = []
-            for c in skill_policy_simulation_cases():
-                ctype = c.get("type")
-                field = str(c.get("field", ""))
-                val = str((pj or {}).get(field, ""))
-                ok = True
-                if ctype == "non_empty":
-                    ok = bool(val.strip())
-                elif ctype == "allowed_values":
-                    ok = val.strip().lower() in {str(x).strip().lower() for x in c.get("allowed", [])}
-                if bool(c.get("expect_ok", True)) != bool(ok):
-                    bad.append(f"{c.get('case_id')}: {field}={val!r}")
-            if bad:
-                sp_ok = False
-                sp_note = "; ".join(bad)[:300]
-        except Exception as exc:
+
+def _sim_check_skill_policy_simulation(art: sqlite3.Row) -> Optional[tuple[str, bool, str]]:
+    if (art["artifact_type"] or "") != "skill_policy_change" or (art["target"] or "") != "runtime_skill_config":
+        return None
+    sp_ok = True
+    sp_note = "ok"
+    try:
+        pj = json.loads(art["artifact_json"] or "{}")
+        bad = []
+        for c in skill_policy_simulation_cases():
+            ctype = c.get("type")
+            field = str(c.get("field", ""))
+            val = str((pj or {}).get(field, ""))
+            ok = True
+            if ctype == "non_empty":
+                ok = bool(val.strip())
+            elif ctype == "allowed_values":
+                ok = val.strip().lower() in {str(x).strip().lower() for x in c.get("allowed", [])}
+            if bool(c.get("expect_ok", True)) != bool(ok):
+                bad.append(f"{c.get('case_id')}: {field}={val!r}")
+        if bad:
             sp_ok = False
-            sp_note = str(exc)[:300]
-        checks.append(("skill_policy_simulation", sp_ok, sp_note))
+            sp_note = "; ".join(bad)[:300]
+    except Exception as exc:
+        sp_ok = False
+        sp_note = str(exc)[:300]
+    return ("skill_policy_simulation", sp_ok, sp_note)
+
+
+def _sim_check_shell_replay_controller(proposal_id: int, art: sqlite3.Row) -> tuple[tuple[str, bool, str], Optional[dict]]:
+    run_id = f"sim_{proposal_id}_{int(time.time())}"
+    tmp_root = Path("/tmp/xobop_sim")
+    dbm = TempDbManager(DB_FILE, str(tmp_root))
+    temp_db = dbm.fork(run_id)
+    sandbox_root = str(tmp_root / run_id / "sandbox")
+    shell_replay_report = None
+    try:
+        rc = ReplayController(command_policy_checker=_sim_shell_policy_check, diff_builder=_build_shell_replay_diff)
+        art_obj = {
+            "id": int(art["id"]),
+            "artifact_type": art["artifact_type"],
+            "target": art["target"],
+            "artifact_json": art["artifact_json"],
+        }
+        shell_replay_report = rc.run(
+            proposal_id=proposal_id,
+            artifact=art_obj,
+            replay_cases=shell_replay_cases(),
+            golden_cases=shell_golden_cases(),
+            temp_db_path=temp_db,
+            sandbox_root=sandbox_root,
+            apply_artifact_to_temp_state=apply_artifact_to_temp_settings,
+        )
+        replay_ok2 = (shell_replay_report.get("status") == "pass")
+        check = ("shell_replay_controller", replay_ok2, json.dumps(shell_replay_report.get("summary", {}))[:300])
+    except Exception as exc:
+        check = ("shell_replay_controller", False, str(exc)[:300])
+    finally:
+        dbm.cleanup(run_id)
+    return check, shell_replay_report
+
+
+def _simulate_proposal_sync(proposal_id: int) -> str:
+    code_path = Path(__file__).resolve()
+    repo = code_path.parent
+    py = (repo / ".venv" / "bin" / "python")
+    if not py.exists():
+        py = Path(sys.executable)
+
+    art = _latest_artifact_for_proposal(proposal_id)
+    if not art:
+        return "⛔ No compiled artifact for this proposal. Run /improve_compile <proposal_id> first."
+
+    checks: list[tuple[str, bool, str]] = [
+        _sim_check_artifact_validation(art),
+        _sim_check_compile(repo, py),
+        _sim_check_eval_suite(repo, py),
+        _sim_check_replay_regression(),
+    ]
+
+    prompt_check = _sim_check_prompt_golden_replay(art)
+    if prompt_check is not None:
+        checks.append(prompt_check)
+
+    skill_policy_check = _sim_check_skill_policy_simulation(art)
+    if skill_policy_check is not None:
+        checks.append(skill_policy_check)
 
     shell_replay_report = None
     if USE_SHELL_REPLAY_CONTROLLER:
-        run_id = f"sim_{proposal_id}_{int(time.time())}"
-        tmp_root = Path("/tmp/xobop_sim")
-        dbm = TempDbManager(DB_FILE, str(tmp_root))
-        temp_db = dbm.fork(run_id)
-        sandbox_root = str(tmp_root / run_id / "sandbox")
-        try:
-            rc = ReplayController(command_policy_checker=_sim_shell_policy_check, diff_builder=_build_shell_replay_diff)
-            art_obj = {
-                "id": int(art["id"]),
-                "artifact_type": art["artifact_type"],
-                "target": art["target"],
-                "artifact_json": art["artifact_json"],
-            }
-            shell_replay_report = rc.run(
-                proposal_id=proposal_id,
-                artifact=art_obj,
-                replay_cases=shell_replay_cases(),
-                golden_cases=shell_golden_cases(),
-                temp_db_path=temp_db,
-                sandbox_root=sandbox_root,
-                apply_artifact_to_temp_state=apply_artifact_to_temp_settings,
-            )
-            replay_ok2 = (shell_replay_report.get("status") == "pass")
-            checks.append(("shell_replay_controller", replay_ok2, json.dumps(shell_replay_report.get("summary", {}))[:300]))
-        except Exception as exc:
-            checks.append(("shell_replay_controller", False, str(exc)[:300]))
-        finally:
-            dbm.cleanup(run_id)
+        shell_check, shell_replay_report = _sim_check_shell_replay_controller(proposal_id, art)
+        checks.append(shell_check)
 
     overall = all(ok for _, ok, _ in checks)
 
@@ -707,9 +736,76 @@ def _latest_impact_delta(proposal_id: int) -> dict[str, float]:
     return ipo_latest_impact_delta(proposal_id=proposal_id, get_db=get_db)
 def _latest_impact_confidence(proposal_id: int) -> str:
     return ipo_latest_impact_confidence(proposal_id=proposal_id, get_db=get_db)
-def _promote_proposal_sync(proposal_id: int, force: bool = False, reason: str = "") -> str:
-    import subprocess
+def _promote_guard_terminal_status(proposal_id: int, status: str) -> Optional[str]:
+    if status in {"promoted", "rejected"}:
+        return f"Proposal #{proposal_id} already {status}."
+    return None
 
+
+def _promote_guard_force_reason(force: bool, reason: str) -> Optional[str]:
+    if force and not (reason or "").strip():
+        return "⛔ Force promotion requires a reason. Use: /improve_promote <id> force <reason>"
+    return None
+
+
+def _promote_guard_baseline_phase(phase: str, force: bool) -> Optional[str]:
+    if phase == "baseline" and not force:
+        return "⛔ Eval phase is baseline: promotion disabled (use force only for emergency)."
+    return None
+
+
+def _promote_guard_simulation_gate(sim: Optional[str]) -> Optional[str]:
+    if sim != "ok":
+        return "⛔ Promotion blocked: simulation gate is not PASS. Run /improve_simulate first."
+    return None
+
+
+def _promote_guard_manual_policy(policy: str, force: bool) -> Optional[str]:
+    if policy == "manual" and not force:
+        return "⛔ Policy=manual. Re-run with force for explicit approval."
+    return None
+
+
+def _promote_guard_risk_level(risk: str, policy: str, force: bool) -> Optional[str]:
+    if risk == "high" and not force:
+        return "⛔ High-risk proposal requires explicit force approval."
+    if risk == "medium" and policy in {"manual", "assisted"} and not force:
+        return "⛔ Medium-risk proposal requires force under current policy."
+    return None
+
+
+def _promote_guard_prompt_artifact_force(art: sqlite3.Row, force: bool) -> Optional[str]:
+    if art["artifact_type"] == "prompt_change" and art["target"] == "runtime_prompt" and not force:
+        return "⛔ Prompt artifacts require force approval due to global behavior blast radius."
+    return None
+
+
+def _promote_guard_impact_regression(imp: Optional[str], force: bool) -> Optional[str]:
+    if imp == "error" and not force:
+        return "⛔ Impact comparison indicates regression. Use force only with explicit acceptance."
+    return None
+
+
+def _promote_guard_impact_confidence(imp: Optional[str], proposal_id: int, force: bool) -> Optional[str]:
+    if imp == "ok" and not force:
+        conf = _latest_impact_confidence(proposal_id)
+        if conf == "low":
+            return "⛔ Impact comparison confidence is LOW (< 20 samples before or after). Wait for more telemetry or use force to override."
+    return None
+
+
+def _promote_guard_retry_net_benefit(art: sqlite3.Row, proposal_id: int, force: bool) -> Optional[str]:
+    if art["artifact_type"] == "config_change" and art["target"] == "runtime_retry_policy" and not force:
+        d = _latest_impact_delta(proposal_id)
+        if d:
+            fail_delta = float(d.get("fail_rate", 0.0))
+            lat_delta = float(d.get("avg_latency", 0.0))
+            if not (fail_delta <= -1.0 and lat_delta <= 300.0):
+                return "⛔ Retry artifact blocked by net-benefit rule (need fail_rate <= -1.0pp and avg_latency <= +300ms)."
+    return None
+
+
+def _promote_proposal_sync(proposal_id: int, force: bool = False, reason: str = "") -> str:
     policy = _get_improve_policy()
     phase = _get_eval_phase()
     promotion_mode = "force" if force else "policy"
@@ -721,14 +817,12 @@ def _promote_proposal_sync(proposal_id: int, force: bool = False, reason: str = 
         if not p:
             raise ValueError(f"Proposal not found: {proposal_id}")
 
-    if p["status"] in {"promoted", "rejected"}:
-        return f"Proposal #{proposal_id} already {p['status']}."
-
-    if force and not (reason or "").strip():
-        return "⛔ Force promotion requires a reason. Use: /improve_promote <id> force <reason>"
-
-    if phase == "baseline" and not force:
-        return "⛔ Eval phase is baseline: promotion disabled (use force only for emergency)."
+    if (msg := _promote_guard_terminal_status(proposal_id, p["status"])) is not None:
+        return msg
+    if (msg := _promote_guard_force_reason(force, reason)) is not None:
+        return msg
+    if (msg := _promote_guard_baseline_phase(phase, force)) is not None:
+        return msg
 
     art = _latest_artifact_for_proposal(proposal_id)
     if not art:
@@ -738,36 +832,20 @@ def _promote_proposal_sync(proposal_id: int, force: bool = False, reason: str = 
     sim = _latest_run_status(proposal_id, "simulation")
     imp = _latest_run_status(proposal_id, "impact_compare")
 
-    if sim != "ok":
-        return "⛔ Promotion blocked: simulation gate is not PASS. Run /improve_simulate first."
-
-    if policy == "manual" and not force:
-        return "⛔ Policy=manual. Re-run with force for explicit approval."
-
-    if risk == "high" and not force:
-        return "⛔ High-risk proposal requires explicit force approval."
-    if risk == "medium" and policy in {"manual", "assisted"} and not force:
-        return "⛔ Medium-risk proposal requires force under current policy."
-
-    if art["artifact_type"] == "prompt_change" and art["target"] == "runtime_prompt" and not force:
-        return "⛔ Prompt artifacts require force approval due to global behavior blast radius."
-
-    if imp == "error" and not force:
-        return "⛔ Impact comparison indicates regression. Use force only with explicit acceptance."
-
-    if imp == "ok" and not force:
-        conf = _latest_impact_confidence(proposal_id)
-        if conf == "low":
-            return "⛔ Impact comparison confidence is LOW (< 20 samples before or after). Wait for more telemetry or use force to override."
-
-    # Net-benefit guard for retry policy artifacts
-    if art["artifact_type"] == "config_change" and art["target"] == "runtime_retry_policy" and not force:
-        d = _latest_impact_delta(proposal_id)
-        if d:
-            fail_delta = float(d.get("fail_rate", 0.0))
-            lat_delta = float(d.get("avg_latency", 0.0))
-            if not (fail_delta <= -1.0 and lat_delta <= 300.0):
-                return "⛔ Retry artifact blocked by net-benefit rule (need fail_rate <= -1.0pp and avg_latency <= +300ms)."
+    if (msg := _promote_guard_simulation_gate(sim)) is not None:
+        return msg
+    if (msg := _promote_guard_manual_policy(policy, force)) is not None:
+        return msg
+    if (msg := _promote_guard_risk_level(risk, policy, force)) is not None:
+        return msg
+    if (msg := _promote_guard_prompt_artifact_force(art, force)) is not None:
+        return msg
+    if (msg := _promote_guard_impact_regression(imp, force)) is not None:
+        return msg
+    if (msg := _promote_guard_impact_confidence(imp, proposal_id, force)) is not None:
+        return msg
+    if (msg := _promote_guard_retry_net_benefit(art, proposal_id, force)) is not None:
+        return msg
 
     # Apply typed artifact (safe mutable scopes only)
     ajson = json.loads(art["artifact_json"] or "{}")
