@@ -1440,6 +1440,38 @@ async def cmd_memdel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await cmd_memdel_impl(update=update, owner_only=_owner_only, reply=_reply, delete_memory_sync=_delete_memory_sync)
 
 
+async def cmd_memdedup(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    await cmd_memdedup_impl(update=update, owner_only=_owner_only, reply=_reply, memdedup=_memdedup_sync)
+
+
+async def cmd_remind(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    await cmd_remind_impl(
+        update=update, owner_only=_owner_only, reply=_reply,
+        add_reminder=_add_reminder, parse_when=rt_parse_reminder_when, utcnow=datetime.utcnow,
+    )
+
+
+async def cmd_reminders(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    await cmd_reminders_impl(update=update, owner_only=_owner_only, reply=_reply, list_reminders=_list_reminders)
+
+
+async def cmd_remindcancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    await cmd_remindcancel_impl(update=update, owner_only=_owner_only, reply=_reply, cancel_reminder=_cancel_reminder)
+
+
+def _new_remind_job_name() -> str:
+    return f"remind-{int(time.time() * 1000)}"
+
+
+async def cmd_remindevery(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    await cmd_remindevery_impl(
+        update=update, ctx=ctx, owner_only=_owner_only, reply=_reply,
+        parse_cron_expr=_parse_cron_expr, parse_nl_to_cron=_parse_nl_to_cron,
+        add_cron_job=_add_cron_job, sync_scheduler=_sync_scheduler,
+        new_job_name=_new_remind_job_name,
+    )
+
+
 async def cmd_memdiag(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await cmd_memdiag_impl(update=update, owner_only=_owner_only, reply=_reply, memory_diag=_memory_diag)
 

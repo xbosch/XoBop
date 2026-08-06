@@ -75,6 +75,10 @@ from xobop.text_math import cosine as tm_cosine, deterministic_hash as tm_hash, 
 from xobop.policy_helpers import blocked_suffix as ph_blocked_suffix, domain_allowed as ph_domain_allowed, is_under_root as ph_is_under_root
 from xobop.artifacts_io import shorten_or_artifact as aio_shorten_or_artifact, store_artifact as aio_store_artifact
 from xobop.memory_math import fallback_embedding as mm_fallback_embedding
+from xobop.memory_dedup import cluster_duplicates as md_cluster_duplicates, find_best_match as md_find_best_match
+from xobop.reminder_time import parse_reminder_when as rt_parse_reminder_when
+from xobop.reminders_ops import check_due_reminders as ro_check_due_reminders
+from xobop.digest_ops import build_daily_digest as do_build_daily_digest
 from xobop.runtime_state import (
     build_runtime_state_payload as rs_build_payload,
     build_state_check_dict as rs_build_state_check_dict,
@@ -193,12 +197,19 @@ from xobop.commands_memory import (
     cmd_evolve_status_impl,
     cmd_facts_impl,
     cmd_memadd_impl,
+    cmd_memdedup_impl,
     cmd_memdel_impl,
     cmd_memdiag_impl,
     cmd_memories_impl,
     cmd_remember_impl,
     cmd_tasks_impl,
     cmd_topskills_impl,
+)
+from xobop.commands_reminders import (
+    cmd_remind_impl,
+    cmd_reminders_impl,
+    cmd_remindcancel_impl,
+    cmd_remindevery_impl,
 )
 from xobop.commands_safety import (
     cmd_delfact_impl,
@@ -354,6 +365,7 @@ MAX_CRONRUNS_LIMIT = 50
 MAX_MEMORY_RESULTS = 15
 MAX_MEMORY_ITEMS = 5_000
 MAX_MEMORY_TEXT = 2_000
+MEMORY_DEDUP_THRESHOLD = 0.92
 MAX_HEALTH_ERRORS = 50
 
 ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
@@ -1298,15 +1310,105 @@ def _delete_memory_sync(memory_id: int) -> str:
     return f"✓ Memory {memory_id} deleted." if cur.rowcount else f"Memory not found: {memory_id}"
 
 
+def _find_duplicate_memory_sync(embedding: list[float], threshold: float = MEMORY_DEDUP_THRESHOLD) -> int | None:
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT mi.id, mv.embedding_json FROM memory_items mi "
+            "JOIN memory_vectors mv ON mv.memory_id = mi.id WHERE mi.is_deleted=0"
+        ).fetchall()
+    candidates = [(int(r["id"]), json.loads(r["embedding_json"])) for r in rows]
+    return md_find_best_match(embedding, candidates, threshold)
+
+
 async def _add_memory(text: str, mem_type: str = "note", importance: float = 0.6, source: str = "", pinned: bool = False) -> int:
     clean_text = text.strip()[:MAX_MEMORY_TEXT]
     if not clean_text:
         raise RuntimeError("empty memory")
-    memory_id = _insert_memory_item_sync(clean_text, mem_type, importance, source, pinned)
     embedding, model_name = await _embed_text(clean_text)
+
     loop = asyncio.get_running_loop()
+    dup_id = await loop.run_in_executor(None, lambda: _find_duplicate_memory_sync(embedding))
+    if dup_id is not None:
+        with get_db() as conn:
+            conn.execute(
+                "UPDATE memory_items SET importance=MIN(1.0, MAX(importance, ?)), pinned=MAX(pinned, ?), "
+                "access_count=access_count+1, last_access_ts=CURRENT_TIMESTAMP WHERE id=?",
+                (importance, 1 if pinned else 0, dup_id),
+            )
+        return dup_id
+
+    memory_id = _insert_memory_item_sync(clean_text, mem_type, importance, source, pinned)
     await loop.run_in_executor(None, lambda: _save_memory_vector_sync(memory_id, embedding, model_name))
     return memory_id
+
+
+def _memdedup_sync(threshold: float = MEMORY_DEDUP_THRESHOLD) -> str:
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT mi.id, mi.pinned, mi.importance, mi.access_count, mv.embedding_json "
+            "FROM memory_items mi JOIN memory_vectors mv ON mv.memory_id = mi.id "
+            "WHERE mi.is_deleted=0 ORDER BY mi.pinned DESC, mi.importance DESC, mi.id ASC"
+        ).fetchall()
+
+    by_id = {int(r["id"]): r for r in rows}
+    items = [{"id": int(r["id"]), "embedding": json.loads(r["embedding_json"])} for r in rows]
+    clusters = md_cluster_duplicates(items, threshold)
+
+    merged = 0
+    with get_db() as conn:
+        for survivor_id, dup_ids in clusters.items():
+            if not dup_ids:
+                continue
+            survivor = by_id[survivor_id]
+            merged_importance = float(survivor["importance"])
+            merged_pinned = int(survivor["pinned"])
+            merged_access = int(survivor["access_count"])
+            for did in dup_ids:
+                d = by_id[did]
+                merged_importance = max(merged_importance, float(d["importance"]))
+                merged_pinned = max(merged_pinned, int(d["pinned"]))
+                merged_access += int(d["access_count"])
+            conn.execute(
+                "UPDATE memory_items SET importance=?, pinned=?, access_count=?, last_access_ts=CURRENT_TIMESTAMP WHERE id=?",
+                (min(1.0, merged_importance), merged_pinned, merged_access, survivor_id),
+            )
+            for did in dup_ids:
+                conn.execute("UPDATE memory_items SET is_deleted=1 WHERE id=?", (did,))
+                conn.execute("DELETE FROM memory_items_fts WHERE rowid=?", (did,))
+                merged += 1
+
+    survivors = sum(1 for dup_ids in clusters.values() if dup_ids)
+    return f"Deduplicated: merged {merged} duplicate(s) into {survivors} surviving memories." if merged else "No duplicates found."
+
+
+def _add_reminder(*, chat_id: int, text: str, due_ts: datetime) -> int:
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO reminders(chat_id,text,due_ts) VALUES (?,?,?)",
+            (chat_id, text, due_ts.strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        row = conn.execute("SELECT last_insert_rowid() AS id").fetchone()
+        return int(row["id"])
+
+
+def _list_reminders() -> str:
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id, text, due_ts FROM reminders WHERE status='pending' ORDER BY due_ts ASC LIMIT 50"
+        ).fetchall()
+    if not rows:
+        return "No pending reminders."
+    lines = [f"#{r['id']} {r['due_ts']} — {r['text']}" for r in rows]
+    return "\n".join(lines)
+
+
+def _cancel_reminder(reminder_id: int) -> str:
+    with get_db() as conn:
+        cur = conn.execute(
+            "UPDATE reminders SET status='cancelled' WHERE id=? AND status='pending'",
+            (reminder_id,),
+        )
+    return f"✓ Reminder #{reminder_id} cancelled." if cur.rowcount else f"No pending reminder found: {reminder_id}"
 
 
 def _promote_fact_to_memory_sync(key: str, value: str) -> None:
@@ -2010,6 +2112,18 @@ async def _run_cron_job(job_name: str) -> None:
             max_proposals = int(skill_args.get("max_proposals", 10))
             loop = asyncio.get_running_loop()
             output = await loop.run_in_executor(None, lambda: _run_pipeline_sweep(max_proposals=max_proposals))
+        elif skill_type == "reminders_check":
+            output = await ro_check_due_reminders(get_db=get_db, notify_owner=_notify_owner, utcnow=datetime.utcnow)
+        elif skill_type == "daily_digest":
+            loop = asyncio.get_running_loop()
+            digest = await loop.run_in_executor(None, lambda: do_build_daily_digest(get_db=get_db))
+            if digest:
+                await _notify_owner(digest)
+            output = digest or "Nothing to report."
+        elif skill_type == "notify":
+            text = skill_args.get("text", "")
+            await _notify_owner(f"⏰ Reminder: {text}")
+            output = "Notified owner."
         else:
             raise ValueError(f"Unknown cron skill_type: {skill_type}")
     except Exception as exc:

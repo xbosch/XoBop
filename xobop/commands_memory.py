@@ -194,6 +194,19 @@ async def cmd_memdel_impl(*, update, owner_only, reply, delete_memory_sync):
     await reply(update, delete_memory_sync(memory_id))
 
 
+async def cmd_memdedup_impl(*, update, owner_only, reply, memdedup):
+    if not owner_only(update):
+        return
+    raw = update.message.text.partition(" ")[2].strip()
+    try:
+        threshold = float(raw) if raw else None
+    except ValueError:
+        await reply(update, "Use: `/memdedup [threshold]` (0-1, default 0.92)")
+        return
+    result = memdedup(threshold) if threshold is not None else memdedup()
+    await reply(update, result)
+
+
 async def cmd_memdiag_impl(*, update, owner_only, reply, memory_diag):
     if not owner_only(update):
         return

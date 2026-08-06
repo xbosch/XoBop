@@ -15,7 +15,8 @@ def build_app(*, token: str, post_init, post_shutdown) -> Application:
 
 def register_handlers(*, app: Application, commands: dict[str, object], cmd_unknown, handle_media_message, handle_message, on_error) -> None:
     command_order = [
-        "remember", "delfact", "facts", "memories", "memadd", "memdel", "memdiag",
+        "remember", "delfact", "facts", "memories", "memadd", "memdel", "memdedup", "memdiag",
+        "remind", "reminders", "remindcancel", "remindevery",
         "addtask", "donetask", "tasks", "mode", "promptshow", "promptset",
         "promptproposal", "promptapprove", "promptreject", "quiethours", "quietoff",
         "quietflush", "status", "health", "checkup", "state_check", "state_repair", "state_clear",

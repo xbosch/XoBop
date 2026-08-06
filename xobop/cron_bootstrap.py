@@ -45,12 +45,37 @@ def ensure_default_cron_jobs(conn: sqlite3.Connection, repo_cwd: str) -> None:
             json.dumps({"max_proposals": 10}),
         ),
     ]
+    jobs_no_alert = [
+        (
+            "reminders-check-5m",
+            "Notify owner of due reminders and mark them sent",
+            "*/5 * * * *",
+            "reminders_check",
+            "{}",
+        ),
+        (
+            "daily-digest-8am",
+            "Proactive morning digest: due reminders, stale important memories, pipeline health",
+            "0 8 * * *",
+            "daily_digest",
+            "{}",
+        ),
+    ]
 
     for name, description, cron_expr, skill_type, skill_args in jobs:
         conn.execute(
             """
             INSERT OR IGNORE INTO cron_jobs (name,description,cron_expr,skill_type,skill_args,enabled,alert_owner,updated_ts)
             VALUES (?,?,?,?,?,1,1,CURRENT_TIMESTAMP)
+            """,
+            (name, description, cron_expr, skill_type, skill_args),
+        )
+
+    for name, description, cron_expr, skill_type, skill_args in jobs_no_alert:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO cron_jobs (name,description,cron_expr,skill_type,skill_args,enabled,alert_owner,updated_ts)
+            VALUES (?,?,?,?,?,1,0,CURRENT_TIMESTAMP)
             """,
             (name, description, cron_expr, skill_type, skill_args),
         )

@@ -267,6 +267,23 @@ def _migration_14_evolve_blocks_cron(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_15_reminders_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS reminders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            due_ts DATETIME NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_ts DATETIME DEFAULT CURRENT_TIMESTAMP,
+            notified_ts DATETIME
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(status, due_ts)")
+
+
 def apply_migrations(conn: sqlite3.Connection) -> None:
     """Apply additive schema migrations in deterministic order."""
     _ensure_migrations_table(conn)
@@ -286,6 +303,7 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
         (12, "evolution_query_vectors", _migration_12_evolution_query_vectors),
         (13, "evolution_memory_blocks", _migration_13_evolution_memory_blocks),
         (14, "evolve_blocks_cron", _migration_14_evolve_blocks_cron),
+        (15, "reminders_table", _migration_15_reminders_table),
     ]
 
     existing = {

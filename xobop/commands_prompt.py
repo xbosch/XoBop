@@ -12,6 +12,11 @@ HELP_TEXT = """*XaviExecutor V5 Commands*
 /memories [limit] — list semantic memory
 /memadd text — add pinned memory
 /memdel id — delete memory
+/memdedup [threshold] — merge near-duplicate memories (default threshold 0.92)
+/remind <when> <text> — one-shot reminder (in 30m / in 2h / at 15:30 / tomorrow at 9am)
+/reminders — list pending reminders
+/remindcancel id — cancel a pending reminder
+/remindevery <schedule> | <text> — recurring reminder (cron syntax or natural language schedule); manage via /cronlist /cronrm /cronoff
 /addtask [priority:] desc — add a task
 /donetask id — close a task
 /tasks — list open tasks
