@@ -1,8 +1,18 @@
 import xobop_core_base as _base
 
-# Explicit compatibility export (including private symbols used by tests/bridges)
+# Explicit compatibility export (including private symbols used by tests/bridges).
+# Dunder attributes (__name__, __file__, __doc__, etc.) are module identity
+# metadata, not application state -- copying them clobbers this module's own
+# identity. In particular, __name__ getting overwritten here (and propagated
+# through the same pattern in xobop_core.py and XoBop.py) silently broke
+# `if __name__ == "__main__":` in XoBop.py: by the time that check ran,
+# __name__ had been overwritten to "xobop_core_base", so `python XoBop.py`
+# (and any process manager invoking it that way, e.g. systemd) never
+# actually called main() -- it exited 0 immediately with zero output and
+# looked like a successful run. Only worked via scripts/start_dev.sh, which
+# happens to sidestep the guard entirely by calling XoBop.main() explicitly.
 for _k, _v in vars(_base).items():
-    if _k == "__builtins__":
+    if _k.startswith("__"):
         continue
     globals()[_k] = _v
 

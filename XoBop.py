@@ -6,7 +6,17 @@ Runtime implementation moved to xobop_core.py to keep this entrypoint thin.
 
 import xobop_core as _core
 
-globals().update(vars(_core))
+# See the __name__-clobbering comment in xobop_core_tail.py -- dunder
+# attributes are module identity, not application state. Without this
+# exclusion, this module's own __name__ gets overwritten (to
+# "xobop_core_base", via the same pattern repeated through xobop_core.py and
+# xobop_core_tail.py), which makes `if __name__ == "__main__":` below always
+# false -- `python XoBop.py` would exit 0 immediately without ever calling
+# main(), silently.
+for _k, _v in vars(_core).items():
+    if _k.startswith("__"):
+        continue
+    globals()[_k] = _v
 
 
 async def cmd_unknown(update, ctx):
