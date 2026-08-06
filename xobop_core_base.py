@@ -350,6 +350,7 @@ MEMORY_DEDUP_THRESHOLD = 0.92
 _memory_write_lock = asyncio.Lock()
 MAX_REMINDER_TEXT = 3_500  # headroom under Telegram's 4096-char message cap for the "⏰ Reminder: " prefix
 REMINDER_MAX_ATTEMPTS = 5
+OP_EVENTS_RETENTION_DAYS = 120
 MAX_HEALTH_ERRORS = 50
 
 ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
@@ -1603,6 +1604,19 @@ def _prune_memory_sync() -> None:
             """,
             (keep,),
         )
+
+
+def _prune_op_events_sync() -> str:
+    # Widest known query window over op_events is 90 days (improve_pipeline_ops.py's
+    # d = max(1, min(days, 90))) -- default retention keeps a safety margin above that.
+    retention_days = int(_get_policy("op_events_retention_days", str(OP_EVENTS_RETENTION_DAYS)))
+    with get_db() as conn:
+        cur = conn.execute(
+            "DELETE FROM op_events WHERE timestamp < datetime('now', ?)",
+            (f"-{retention_days} day",),
+        )
+        deleted = cur.rowcount
+    return f"op_events cleanup: deleted {deleted} row(s) older than {retention_days} days."
 
 
 def _today_daily_path() -> Path:

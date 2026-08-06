@@ -1938,6 +1938,11 @@ async def _cron_handle_memory_cleanup(job_name: str, skill_args: dict) -> str:
     return "Memory cleanup completed."
 
 
+async def _cron_handle_op_events_cleanup(job_name: str, skill_args: dict) -> str:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _prune_op_events_sync)
+
+
 async def _cron_handle_db_backup(job_name: str, skill_args: dict) -> str:
     backup_dir = skill_args.get("backup_dir", str(settings.backup_dir))
     repo_dir = skill_args.get("repo_dir", os.getcwd())
@@ -2017,6 +2022,7 @@ async def _cron_handle_notify(job_name: str, skill_args: dict) -> str:
 _cron_skill_handlers: dict = {
     "agent": _cron_handle_agent,
     "memory_cleanup": _cron_handle_memory_cleanup,
+    "op_events_cleanup": _cron_handle_op_events_cleanup,
     "db_backup": _cron_handle_db_backup,
     "prompt_review": _cron_handle_prompt_review,
     "checkup": _cron_handle_checkup,

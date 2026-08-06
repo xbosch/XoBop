@@ -60,6 +60,13 @@ def ensure_default_cron_jobs(conn: sqlite3.Connection, repo_cwd: str) -> None:
             "daily_digest",
             "{}",
         ),
+        (
+            "op-events-cleanup-daily",
+            "Delete op_events rows older than the retention window (unbounded table growth otherwise)",
+            "0 4 * * *",
+            "op_events_cleanup",
+            "{}",
+        ),
     ]
 
     for name, description, cron_expr, skill_type, skill_args in jobs:
