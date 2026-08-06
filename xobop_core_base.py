@@ -103,31 +103,7 @@ from xobop.core_startup_runtime import (
     state_persist_loop_impl as csr_state_persist_loop_impl,
     sync_scheduler_impl as csr_sync_scheduler_impl,
 )
-from xobop.core_memory_runtime import (
-    MemoryItem,
-    add_memory_impl as cmr_add_memory_impl,
-    append_daily_memory_impl as cmr_append_daily_memory_impl,
-    build_file_memory_block_impl as cmr_build_file_memory_block_impl,
-    build_memory_block_impl as cmr_build_memory_block_impl,
-    build_structured_memory_block_impl as cmr_build_structured_memory_block_impl,
-    delete_memory_sync_impl as cmr_delete_memory_sync_impl,
-    embed_text_impl as cmr_embed_text_impl,
-    insert_memory_item_sync_impl as cmr_insert_memory_item_sync_impl,
-    list_memories_impl as cmr_list_memories_impl,
-    maybe_promote_memory_impl as cmr_maybe_promote_memory_impl,
-    memory_count_impl as cmr_memory_count_impl,
-    memory_item_is_prompt_polluting_impl as cmr_memory_item_is_prompt_polluting_impl,
-    memory_rows_impl as cmr_memory_rows_impl,
-    promote_fact_to_memory_sync_impl as cmr_promote_fact_to_memory_sync_impl,
-    promote_long_memory_impl as cmr_promote_long_memory_impl,
-    prune_memory_sync_impl as cmr_prune_memory_sync_impl,
-    retrieve_memory_impl as cmr_retrieve_memory_impl,
-    retrieve_memory_lexical_impl as cmr_retrieve_memory_lexical_impl,
-    save_fact_memory_impl as cmr_save_fact_memory_impl,
-    save_memory_vector_sync_impl as cmr_save_memory_vector_sync_impl,
-    today_daily_path_impl as cmr_today_daily_path_impl,
-    yesterday_daily_path_impl as cmr_yesterday_daily_path_impl,
-)
+from xobop.memory_types import MemoryItem
 from xobop.core_memory_queue_runtime import (
     cleanup_memory_promotion_queue as cmq_cleanup,
     drain_memory_promotion_queue_once as cmq_drain_once,

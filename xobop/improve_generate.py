@@ -13,9 +13,9 @@ TESTER_NOISE_COMMANDS: frozenset[str] = frozenset({"/unknowncommand"})
 def build_improve_priorities_block(priorities_file: Path) -> str:
     """Read the human-edited steering doc for /improve_propose, if present.
 
-    Mirrors build_file_memory_block_impl's shape (xobop/core_memory_runtime.py)
-    so proposal generation can be steered the same way chat replies are
-    steered by MEMORY.md, without inventing a new file-reading convention.
+    Mirrors _build_file_memory_block's shape (xobop_core_base.py) so proposal
+    generation can be steered the same way chat replies are steered by
+    MEMORY.md, without inventing a new file-reading convention.
     """
     if not priorities_file.exists():
         return ""
