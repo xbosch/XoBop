@@ -2,6 +2,9 @@
 .env
 *.pem
 *.key
+config/browser_storage_state.json
+config/google_credentials.json
+config/google_token.json
 
 # Python
 __pycache__/
