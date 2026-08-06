@@ -194,16 +194,29 @@ async def cmd_memdel_impl(*, update, owner_only, reply, delete_memory_sync):
     await reply(update, delete_memory_sync(memory_id))
 
 
-async def cmd_memdedup_impl(*, update, owner_only, reply, memdedup):
+async def cmd_memdedup_impl(*, update, owner_only, reply, memdedup_preview, memdedup_apply, min_threshold, max_threshold, default_threshold):
     if not owner_only(update):
         return
     raw = update.message.text.partition(" ")[2].strip()
-    try:
-        threshold = float(raw) if raw else None
-    except ValueError:
-        await reply(update, "Use: `/memdedup [threshold]` (0-1, default 0.92)")
+    parts = raw.split()
+    confirm = bool(parts) and parts[0].lower() == "confirm"
+    if confirm:
+        parts = parts[1:]
+
+    if parts:
+        try:
+            threshold = float(parts[0])
+        except ValueError:
+            await reply(update, "Use: `/memdedup [confirm] [threshold]` (threshold 0.5-0.999, default 0.92)")
+            return
+    else:
+        threshold = default_threshold
+
+    if not (min_threshold <= threshold <= max_threshold):
+        await reply(update, f"Threshold must be between {min_threshold} and {max_threshold}.")
         return
-    result = memdedup(threshold) if threshold is not None else memdedup()
+
+    result = memdedup_apply(threshold) if confirm else memdedup_preview(threshold)
     await reply(update, result)
 
 

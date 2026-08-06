@@ -12,7 +12,7 @@ HELP_TEXT = """*XaviExecutor V5 Commands*
 /memories [limit] — list semantic memory
 /memadd text — add pinned memory
 /memdel id — delete memory
-/memdedup [threshold] — merge near-duplicate memories (default threshold 0.92)
+/memdedup [confirm] [threshold] — preview (default) or apply (confirm) near-duplicate merge, threshold 0.5-0.999 default 0.92
 /remind <when> <text> — one-shot reminder (in 30m / in 2h / at 15:30 / tomorrow at 9am)
 /reminders — list pending reminders
 /remindcancel id — cancel a pending reminder

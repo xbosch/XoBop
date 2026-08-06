@@ -1441,7 +1441,12 @@ async def cmd_memdel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_memdedup(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    await cmd_memdedup_impl(update=update, owner_only=_owner_only, reply=_reply, memdedup=_memdedup_sync)
+    await cmd_memdedup_impl(
+        update=update, owner_only=_owner_only, reply=_reply,
+        memdedup_preview=_memdedup_preview_sync, memdedup_apply=_memdedup_sync,
+        min_threshold=MEMDEDUP_MIN_THRESHOLD, max_threshold=MEMDEDUP_MAX_THRESHOLD,
+        default_threshold=MEMORY_DEDUP_THRESHOLD,
+    )
 
 
 async def cmd_remind(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

@@ -1344,17 +1344,38 @@ async def _add_memory(text: str, mem_type: str = "note", importance: float = 0.6
     return memory_id
 
 
-def _memdedup_sync(threshold: float = MEMORY_DEDUP_THRESHOLD) -> str:
+MEMDEDUP_MIN_THRESHOLD = 0.5
+MEMDEDUP_MAX_THRESHOLD = 0.999
+
+
+def _memdedup_query_clusters(threshold: float) -> tuple[dict[int, sqlite3.Row], dict[int, list[int]]]:
     with get_db() as conn:
         rows = conn.execute(
             "SELECT mi.id, mi.pinned, mi.importance, mi.access_count, mv.embedding_json "
             "FROM memory_items mi JOIN memory_vectors mv ON mv.memory_id = mi.id "
             "WHERE mi.is_deleted=0 ORDER BY mi.pinned DESC, mi.importance DESC, mi.id ASC"
         ).fetchall()
-
     by_id = {int(r["id"]): r for r in rows}
     items = [{"id": int(r["id"]), "embedding": json.loads(r["embedding_json"])} for r in rows]
     clusters = md_cluster_duplicates(items, threshold)
+    return by_id, clusters
+
+
+def _memdedup_preview_sync(threshold: float = MEMORY_DEDUP_THRESHOLD) -> str:
+    """Read-only: report what /memdedup confirm would do, without touching anything."""
+    _, clusters = _memdedup_query_clusters(threshold)
+    merged = sum(len(dup_ids) for dup_ids in clusters.values())
+    survivors = sum(1 for dup_ids in clusters.values() if dup_ids)
+    if not merged:
+        return "No duplicates found."
+    return (
+        f"Would merge {merged} duplicate(s) into {survivors} surviving memories "
+        f"(threshold={threshold}). Run `/memdedup confirm {threshold}` to apply."
+    )
+
+
+def _memdedup_sync(threshold: float = MEMORY_DEDUP_THRESHOLD) -> str:
+    by_id, clusters = _memdedup_query_clusters(threshold)
 
     merged = 0
     with get_db() as conn:
