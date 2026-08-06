@@ -1809,6 +1809,15 @@ def _startup_reconcile_runtime_state() -> None:
     )
 
 
+# See the _promote_proposal_sync/_run_pipeline_sweep injection above: same
+# fix, for the three remaining tail-only names _run_cron_job's dispatch
+# chain calls. Placed here (after every module-level def) rather than
+# earlier in the file, since these three are defined later than that block.
+_base._run_agent = _run_agent
+_base._run_checkup_sync = _run_checkup_sync
+_base._generate_system_map_sync = _generate_system_map_sync
+
+
 def main() -> None:
     run_main(globals())
 
