@@ -284,6 +284,14 @@ def _migration_15_reminders_table(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(status, due_ts)")
 
 
+def _migration_16_reminders_retry_tracking(conn: sqlite3.Connection) -> None:
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(reminders)").fetchall()}
+    if "attempts" not in cols:
+        conn.execute("ALTER TABLE reminders ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
+    if "last_error" not in cols:
+        conn.execute("ALTER TABLE reminders ADD COLUMN last_error TEXT")
+
+
 def apply_migrations(conn: sqlite3.Connection) -> None:
     """Apply additive schema migrations in deterministic order."""
     _ensure_migrations_table(conn)
@@ -304,6 +312,7 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
         (13, "evolution_memory_blocks", _migration_13_evolution_memory_blocks),
         (14, "evolve_blocks_cron", _migration_14_evolve_blocks_cron),
         (15, "reminders_table", _migration_15_reminders_table),
+        (16, "reminders_retry_tracking", _migration_16_reminders_retry_tracking),
     ]
 
     existing = {

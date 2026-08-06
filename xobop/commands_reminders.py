@@ -48,7 +48,7 @@ async def cmd_remindcancel_impl(*, update, owner_only, reply, cancel_reminder):
     await reply(update, cancel_reminder(reminder_id))
 
 
-async def cmd_remindevery_impl(*, update, ctx, owner_only, reply, parse_cron_expr, parse_nl_to_cron, add_cron_job, sync_scheduler, new_job_name):
+async def cmd_remindevery_impl(*, update, ctx, owner_only, reply, parse_cron_expr, parse_nl_to_cron, add_cron_job, sync_scheduler, new_job_name, max_text_len=3500):
     if not owner_only(update):
         return
     body = update.message.text.partition(" ")[2].strip()
@@ -57,7 +57,7 @@ async def cmd_remindevery_impl(*, update, ctx, owner_only, reply, parse_cron_exp
         await reply(update, "Use: `/remindevery <schedule> | <text>` — e.g. `/remindevery every day at 9am | take meds`")
         return
 
-    schedule, text = parts[0], parts[1]
+    schedule, text = parts[0], parts[1][:max_text_len]
     cron_expr = parse_cron_expr(schedule)
     if not cron_expr:
         cron_expr = await parse_nl_to_cron(schedule)

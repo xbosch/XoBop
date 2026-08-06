@@ -366,6 +366,8 @@ MAX_MEMORY_RESULTS = 15
 MAX_MEMORY_ITEMS = 5_000
 MAX_MEMORY_TEXT = 2_000
 MEMORY_DEDUP_THRESHOLD = 0.92
+MAX_REMINDER_TEXT = 3_500  # headroom under Telegram's 4096-char message cap for the "⏰ Reminder: " prefix
+REMINDER_MAX_ATTEMPTS = 5
 MAX_HEALTH_ERRORS = 50
 
 ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
@@ -1382,10 +1384,11 @@ def _memdedup_sync(threshold: float = MEMORY_DEDUP_THRESHOLD) -> str:
 
 
 def _add_reminder(*, chat_id: int, text: str, due_ts: datetime) -> int:
+    clean_text = text.strip()[:MAX_REMINDER_TEXT]
     with get_db() as conn:
         conn.execute(
             "INSERT INTO reminders(chat_id,text,due_ts) VALUES (?,?,?)",
-            (chat_id, text, due_ts.strftime("%Y-%m-%d %H:%M:%S")),
+            (chat_id, clean_text, due_ts.strftime("%Y-%m-%d %H:%M:%S")),
         )
         row = conn.execute("SELECT last_insert_rowid() AS id").fetchone()
         return int(row["id"])

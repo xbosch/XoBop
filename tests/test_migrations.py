@@ -14,7 +14,7 @@ def test_apply_migrations_records_versions_and_adds_columns():
     apply_migrations(conn)
 
     rows = conn.execute("SELECT id FROM schema_migrations ORDER BY id").fetchall()
-    assert [r["id"] for r in rows] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    assert [r["id"] for r in rows] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
 
     skill_cols = {r["name"] for r in conn.execute("PRAGMA table_info(skill_audit)").fetchall()}
     assert {"owner_id", "cmd_input", "exit_code"}.issubset(skill_cols)

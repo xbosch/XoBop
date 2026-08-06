@@ -1468,7 +1468,7 @@ async def cmd_remindevery(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
         update=update, ctx=ctx, owner_only=_owner_only, reply=_reply,
         parse_cron_expr=_parse_cron_expr, parse_nl_to_cron=_parse_nl_to_cron,
         add_cron_job=_add_cron_job, sync_scheduler=_sync_scheduler,
-        new_job_name=_new_remind_job_name,
+        new_job_name=_new_remind_job_name, max_text_len=MAX_REMINDER_TEXT,
     )
 
 
