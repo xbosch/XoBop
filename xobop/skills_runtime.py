@@ -178,6 +178,12 @@ async def call_skill_impl(*, chat_id: int, user_query: str, mode: str, skill_nam
     artifact_path = None
     result = f"Unknown skill: {skill_name}"
 
+    # Audit-only marker: agent.py sets this when a content-fetching tool
+    # (browse_page/read_file) already ran earlier in the same turn. Strip it
+    # before args reaches any real skill handler -- it must never affect
+    # execution, only the audit trail (see audit_skill call below).
+    prior_content_read = bool(args.pop("_prior_content_read", False)) if isinstance(args, dict) else False
+
     tool_limit = int(get_policy("tool_calls_per_minute", default_global_policies["tool_calls_per_minute"]))
     ok, msg = enforce_rate_limit("tool_calls", tool_limit)
     if not ok:
@@ -186,6 +192,22 @@ async def call_skill_impl(*, chat_id: int, user_query: str, mode: str, skill_nam
     try:
         skill = get_skill(skill_name)
         policies = load_skill_policies(skill.name)
+
+        # Per-skill hourly cap: skill_policies.max_calls_per_hour has been
+        # settable end-to-end via the self-improve artifact pipeline
+        # (xobop/improve.py) since before this check existed, but nothing
+        # ever read it back -- unset today (no default behavior change),
+        # but now a real lever instead of dead plumbing.
+        hourly_cap = policies.get("max_calls_per_hour")
+        if hourly_cap:
+            try:
+                hourly_limit = int(hourly_cap)
+            except (TypeError, ValueError):
+                hourly_limit = None
+            if hourly_limit is not None:
+                ok, msg = enforce_rate_limit(f"skill_hourly:{skill.name}", hourly_limit, lookback_minutes=60)
+                if not ok:
+                    return f"{msg}\nRATE_LIMIT_BUCKET=skill_hourly:{skill.name}\nSUGGESTED_ACTION=retry_later"
 
         if skill.name in {"run_shell", "write_file", "append_file"}:
             # Always clamp write_root to runtime-allowed root to prevent stale DB policy drift.
@@ -236,5 +258,6 @@ async def call_skill_impl(*, chat_id: int, user_query: str, mode: str, skill_nam
         alert_threshold=3,
     )
     fire_and_forget(loop, lambda: update_skill_usage(skill_name, duration_ms, status), label=f"skill_usage:{skill_name}")
-    fire_and_forget(loop, lambda: audit_skill(skill_name, "call", note=status, owner_id=(chat_id if chat_id != 0 else None), cmd_input=(args.get("command", user_query) if isinstance(args, dict) else user_query), exit_code=exit_code), label=f"skill_audit:{skill_name}")
+    audit_note = f"{status};prior_content_read=1" if prior_content_read else status
+    fire_and_forget(loop, lambda: audit_skill(skill_name, "call", note=audit_note, owner_id=(chat_id if chat_id != 0 else None), cmd_input=(args.get("command", user_query) if isinstance(args, dict) else user_query), exit_code=exit_code), label=f"skill_audit:{skill_name}")
     return result

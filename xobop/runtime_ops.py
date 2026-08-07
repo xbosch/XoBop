@@ -30,10 +30,11 @@ def count_rate_events(get_db: Callable, bucket: str, lookback_minutes: int = 1) 
     return int(row["total"] or 0)
 
 
-def enforce_rate_limit(get_db: Callable, bucket: str, limit: int, weight: int = 1) -> tuple[bool, str]:
-    current = count_rate_events(get_db, bucket)
+def enforce_rate_limit(get_db: Callable, bucket: str, limit: int, weight: int = 1, lookback_minutes: int = 1) -> tuple[bool, str]:
+    current = count_rate_events(get_db, bucket, lookback_minutes=lookback_minutes)
     if current + weight > limit:
-        return False, f"⛔ Rate limit exceeded for {bucket}: {current}/{limit} in last minute."
+        window = "last minute" if lookback_minutes == 1 else f"last {lookback_minutes} minutes"
+        return False, f"⛔ Rate limit exceeded for {bucket}: {current}/{limit} in {window}."
     record_rate_event(get_db, bucket, weight)
     return True, ""
 

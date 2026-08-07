@@ -383,6 +383,13 @@ DESTRUCTIVE_PATTERNS = [re.compile(p, re.IGNORECASE) for p in [
     r"\bpkill\b", r"\bkill\b", r"\bkillall\b", r"\bdd\b",
     r"\bmkfs\b", r"\bmount\b", r"\bumount\b",
     r"\btruncate\b", r"\bfind\b.*\b-delete\b",
+    # Fetch/decode-and-execute shapes: the realistic payload form for content
+    # the agent read (a webpage, a tool result) trying to get itself
+    # executed. Not "destructive" in the traditional sense, but exactly the
+    # pattern a prompt-injection attack would use, and previously ungated
+    # (classified "unknown", zero force requirement).
+    r"\|\s*(bash|sh|zsh|python[0-9.]*|perl|ruby|node)\b",
+    r"\bbase64\b\s+(-d|--decode)\b.*\|",
 ]]
 WRITE_PATTERNS = [re.compile(p, re.IGNORECASE) for p in [
     r"\becho\b.*>", r"\bprintf\b.*>", r"\btee\b", r"\bcp\b", r"\bmkdir\b",
@@ -997,8 +1004,8 @@ def _blocked_suffix(path: Path) -> Optional[str]:
     )
 
 
-def _enforce_rate_limit(bucket: str, limit: int, weight: int = 1) -> tuple[bool, str]:
-    return ops_enforce_rate_limit(get_db, bucket, limit, weight)
+def _enforce_rate_limit(bucket: str, limit: int, weight: int = 1, lookback_minutes: int = 1) -> tuple[bool, str]:
+    return ops_enforce_rate_limit(get_db, bucket, limit, weight, lookback_minutes=lookback_minutes)
 
 
 def _update_skill_usage(skill_name: str, duration_ms: int, status: str) -> None:
@@ -1999,7 +2006,7 @@ async def _call_skill(chat_id: int, user_query: str, mode: str, skill_name: str,
             blocked_suffix=ph_blocked_suffix, is_under_root=ph_is_under_root, allowed_write_root=ALLOWED_WRITE_ROOT
         ),
         "http_get": lambda **kw: sr_exec_http_get(
-            skill=kw["skill"], policies=kw["policies"], args=kw["args"], domain_allowed=ph_domain_allowed
+            skill=kw["skill"], policies=kw["policies"], args=kw["args"], domain_allowed=_domain_allowed
         ),
         "file_write": lambda **kw: sr_exec_file_write(
             skill=kw["skill"], policies=kw["policies"], args=kw["args"], allowed_write_root=ALLOWED_WRITE_ROOT,

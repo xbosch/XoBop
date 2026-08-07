@@ -7,6 +7,13 @@ from typing import Any, Callable, Awaitable
 
 from openai import RateLimitError
 
+# Tools whose output is externally-sourced content (a webpage, a file) that
+# the model didn't author -- used to tag subsequent tool calls in the same
+# turn as "came after untrusted content was read," for audit purposes only
+# (see call_skill_impl's _prior_content_read handling). Pure logging, no
+# blocking behavior.
+CONTENT_READ_TOOLS = frozenset({"browse_page", "read_file"})
+
 _ERROR_PATTERNS: list[tuple[str, str]] = [
     ("permission denied", "permission_denied — ask user; do not retry same command"),
     ("operation not permitted", "permission_denied — ask user; do not retry same command"),
@@ -133,6 +140,7 @@ async def run_agent_loop(
 
     final_text = "✓"
     round_count = 0
+    content_tools_seen: set[str] = set()
 
     while round_count < max_tool_rounds:
         try:
@@ -179,8 +187,12 @@ async def run_agent_loop(
                 result = f"Error: could not parse tool arguments — {exc}"
                 log.warning("Tool call %s had bad JSON args: %s", tool_name, exc)
             else:
+                if content_tools_seen and isinstance(tool_args, dict):
+                    tool_args["_prior_content_read"] = True
                 result = await deps.call_skill(chat_id, effective_query, mode, tool_name, tool_args)
                 result = _classify_tool_result(result)
+                if tool_name in CONTENT_READ_TOOLS:
+                    content_tools_seen.add(tool_name)
 
             if chat_id != 0:
                 loop = asyncio.get_running_loop()
@@ -204,6 +216,22 @@ async def run_agent_loop(
             )
             deps.set_last_openai_latency_ms((time.monotonic() - t1) * 1000.0)
             final_text = final_resp.choices[0].message.content or "✓"
+        except Exception:
+            pass
+
+    # If the model returned no content and made no tool calls, force a text-only reply.
+    # This happens with instruction-following models that see nothing to act on (e.g. "Hello").
+    if not final_text:
+        try:
+            t2 = time.monotonic()
+            fallback_resp = await client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=deps.temperature_for_mode(mode),
+                max_tokens=512,
+            )
+            deps.set_last_openai_latency_ms((time.monotonic() - t2) * 1000.0)
+            final_text = (fallback_resp.choices[0].message.content or "").strip()
         except Exception:
             pass
 
