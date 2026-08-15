@@ -223,6 +223,7 @@ from xobop.skills_runtime import (
     exec_http_get as sr_exec_http_get,
     exec_python_fn as sr_exec_python_fn,
     exec_shell_command as sr_exec_shell_command,
+    register_python_fn as sr_register_python_fn,
 )
 from xobop.improve_pipeline_ops import (
     auto_promote_low_sync as ipo_auto_promote_low_sync,
@@ -843,6 +844,7 @@ def _init_extended_skills() -> None:
     import xobop.google_skills as _gs
     import xobop.browser_skill as _bs
     import xobop.media_skills as _ms
+    import xobop.skill_authoring as _sa
     google_ok = _gs.init(token_file=os.getenv("GOOGLE_TOKEN_FILE", "config/google_token.json"))
     playwright_ok = _bs.init()
     media_ok = _ms.init(
@@ -851,6 +853,10 @@ def _init_extended_skills() -> None:
         read_root_fn=lambda: READ_ROOT,
         is_under_root=ph_is_under_root,
     )
+    reserved_names = {s["name"] for s in DEFAULT_SKILLS} | {s["name"] for s in _gs.GOOGLE_SKILLS} \
+        | {s["name"] for s in _bs.BROWSER_SKILLS} | {s["name"] for s in _ms.MEDIA_SKILLS} \
+        | {s["name"] for s in _sa.AUTHOR_SKILL_META}
+    authoring_ok = _sa.init(register_python_fn=sr_register_python_fn, upsert_skill=_upsert_skill, reserved_names=reserved_names)
     skills_to_register = []
     if google_ok:
         skills_to_register.extend(_gs.GOOGLE_SKILLS)
@@ -858,6 +864,8 @@ def _init_extended_skills() -> None:
         skills_to_register.extend(_bs.BROWSER_SKILLS)
     if media_ok:
         skills_to_register.extend(_ms.MEDIA_SKILLS)
+    if authoring_ok:
+        skills_to_register.extend(_sa.AUTHOR_SKILL_META)
     for s in skills_to_register:
         _upsert_skill(
             name=s["name"],
@@ -873,7 +881,7 @@ def _init_extended_skills() -> None:
         )
         for k, v in s.get("policies", {}).items():
             _set_skill_policy(s["name"], k, str(v))
-    log.info("Extended skills: google=%s playwright=%s media=%s", google_ok, playwright_ok, media_ok)
+    log.info("Extended skills: google=%s playwright=%s media=%s authoring=%s", google_ok, playwright_ok, media_ok, authoring_ok)
 
 
 def _row_to_skill(row: sqlite3.Row) -> SkillDef:
