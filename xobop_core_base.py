@@ -679,6 +679,27 @@ async def _notify_owner(text: str) -> None:
     await _app.bot.send_message(chat_id=OWNER_ID, text=text)
 
 
+async def _send_owner_photo(path: Path, caption: str = "") -> None:
+    """Send an image directly to the owner's chat. Used by the send_photo skill.
+
+    Unlike _notify_owner, this is a direct reply to an in-progress conversation
+    (the owner explicitly asked to see the file), so it bypasses quiet-hours
+    suppression -- there's no text-queue equivalent for binary media anyway.
+    """
+    if _app is None:
+        raise RuntimeError("Telegram app not ready yet")
+    with open(path, "rb") as fh:
+        await _app.bot.send_photo(chat_id=OWNER_ID, photo=fh, caption=caption or None)
+
+
+async def _send_owner_document(path: Path, caption: str = "") -> None:
+    """Send an arbitrary file directly to the owner's chat. Used by the send_document skill."""
+    if _app is None:
+        raise RuntimeError("Telegram app not ready yet")
+    with open(path, "rb") as fh:
+        await _app.bot.send_document(chat_id=OWNER_ID, document=fh, filename=path.name, caption=caption or None)
+
+
 def _save_session_state(key: str, obj: dict) -> None:
     cr_save_session_state(get_db=get_db, key=key, obj=obj)
 
@@ -821,13 +842,22 @@ def _init_extended_skills() -> None:
     Called once at startup after _init_db(). Safe to call repeatedly (all upserts are idempotent)."""
     import xobop.google_skills as _gs
     import xobop.browser_skill as _bs
+    import xobop.media_skills as _ms
     google_ok = _gs.init(token_file=os.getenv("GOOGLE_TOKEN_FILE", "config/google_token.json"))
     playwright_ok = _bs.init()
+    media_ok = _ms.init(
+        send_photo_fn=_send_owner_photo,
+        send_document_fn=_send_owner_document,
+        read_root_fn=lambda: READ_ROOT,
+        is_under_root=ph_is_under_root,
+    )
     skills_to_register = []
     if google_ok:
         skills_to_register.extend(_gs.GOOGLE_SKILLS)
     if playwright_ok:
         skills_to_register.extend(_bs.BROWSER_SKILLS)
+    if media_ok:
+        skills_to_register.extend(_ms.MEDIA_SKILLS)
     for s in skills_to_register:
         _upsert_skill(
             name=s["name"],
@@ -843,7 +873,7 @@ def _init_extended_skills() -> None:
         )
         for k, v in s.get("policies", {}).items():
             _set_skill_policy(s["name"], k, str(v))
-    log.info("Extended skills: google=%s playwright=%s", google_ok, playwright_ok)
+    log.info("Extended skills: google=%s playwright=%s media=%s", google_ok, playwright_ok, media_ok)
 
 
 def _row_to_skill(row: sqlite3.Row) -> SkillDef:
