@@ -1832,6 +1832,14 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 async def _post_init(app: Application) -> None:
     global _app, _state_task, _artifact_task, _notify_task, _memory_promo_task
     _app = app
+    # _notify_owner / _send_owner_photo / _send_owner_document are *defined* in
+    # xobop_core_base.py, so they read xobop_core_base's own module-level _app
+    # (never this one) -- same base<->tail cross-namespace bug class as
+    # test_no_orphaned_base_names.py guards against, except this variety is a
+    # stale-value bug (the name resolves fine, it just never gets updated) so
+    # that bytecode-based static check can't catch it. Keep base's copy in sync
+    # here, the one place _app actually changes.
+    _base._app = app
     if any(t and not t.done() for t in (_state_task, _artifact_task, _notify_task, _memory_promo_task)):
         log.warning("post_init called with active background tasks; skipping duplicate task setup")
         return
