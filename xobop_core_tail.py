@@ -214,6 +214,10 @@ async def _call_skill(chat_id: int, user_query: str, mode: str, skill_name: str,
         "file_write": lambda **kw: _exec_file_write(kw["skill"], kw["policies"], kw["args"]),
         "file_append": lambda **kw: _exec_file_append(kw["skill"], kw["policies"], kw["args"]),
         "shell_command": lambda **kw: _exec_shell_command(kw["skill"], kw["policies"], kw["user_query"], kw["args"]),
+        "python_fn": lambda **kw: sr_exec_python_fn(
+            skill=kw["skill"], policies=kw["policies"], args=kw["args"],
+            to_thread=_to_thread, shorten_or_artifact=_shorten_or_artifact,
+        ),
     }
     return await sr_call_skill_impl(
         chat_id=chat_id,
