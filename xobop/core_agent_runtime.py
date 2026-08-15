@@ -5,7 +5,7 @@ import uuid
 from .agent import AgentDeps, run_agent_loop
 
 
-async def run_agent_impl(*, chat_id: int, query: str, force: bool, get_mode, agent_turn_id, get_history, build_memory_block, build_tools_from_db, user_forced, get_runtime_prompt, get_allowed_write_root, save_message, maybe_promote_memory, call_skill, redact, normalize_machine_kv_output, fire_and_forget, set_last_latency_ref, temperature_for_mode, client, model, history_load_limit, max_memory_results, max_tool_rounds, history_max, history_trim_to, log):
+async def run_agent_impl(*, chat_id: int, query: str, force: bool, get_mode, agent_turn_id, get_history, build_memory_block, build_tools_from_db, user_forced, get_runtime_prompt, get_allowed_write_root, get_artifact_dir, save_message, maybe_promote_memory, call_skill, redact, normalize_machine_kv_output, fire_and_forget, set_last_latency_ref, temperature_for_mode, client, model, history_load_limit, max_memory_results, max_tool_rounds, history_max, history_trim_to, log):
     mode = get_mode()
 
     def _set_last_latency(ms: float) -> None:
@@ -20,6 +20,7 @@ async def run_agent_impl(*, chat_id: int, query: str, force: bool, get_mode, age
             user_forced=user_forced,
             get_runtime_prompt=get_runtime_prompt,
             get_allowed_write_root=get_allowed_write_root,
+            get_artifact_dir=get_artifact_dir,
             save_message=save_message,
             maybe_promote_memory=maybe_promote_memory,
             call_skill=call_skill,

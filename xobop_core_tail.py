@@ -275,6 +275,7 @@ async def _run_agent(chat_id: int, query: str, force: bool = False) -> str:
         user_forced=_user_forced,
         get_runtime_prompt=_get_runtime_prompt,
         get_allowed_write_root=lambda: str(ALLOWED_WRITE_ROOT),
+        get_artifact_dir=lambda: str(ARTIFACT_DIR),
         save_message=_save_message,
         maybe_promote_memory=_maybe_promote_memory,
         call_skill=_call_skill,

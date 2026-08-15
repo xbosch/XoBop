@@ -64,6 +64,7 @@ class AgentDeps:
     user_forced: Callable[[str], bool]
     get_runtime_prompt: Callable[[str], str]
     get_allowed_write_root: Callable[[], str]
+    get_artifact_dir: Callable[[], str]
     save_message: Callable[[int, str, str], None]
     maybe_promote_memory: Callable[[str, str], Awaitable[None]]
     call_skill: Callable[[int, str, str, str, dict], Awaitable[str]]
@@ -119,12 +120,19 @@ async def run_agent_loop(
     user_msg = {"role": "user", "content": effective_query}
     base_prompt = deps.get_runtime_prompt(mode)
     write_root = deps.get_allowed_write_root()
+    artifact_dir = deps.get_artifact_dir()
     execution_defaults = (
         "\nExecution defaults:\n"
         f"- Allowed write root is exactly: {write_root}\n"
         f"- If user asks to write/run code without specifying a path, default to {write_root}/agent-test/codegen-check.\n"
         "- Do not ask for folder clarification when the request can be executed inside allowed root.\n"
         "- Ask for confirmation only if user explicitly asks to write outside allowed root.\n"
+        f"- Artifacts (screenshots, generated files) live under exactly: {artifact_dir}\n"
+        f"- User-uploaded attachments (photos/files sent in chat) are saved under exactly: {artifact_dir}/inbox — "
+        "this is the ONLY correct inbox path; never guess a shorter or differently-cased variant of it "
+        "(e.g. do not drop the 'workspace' segment or the project directory name). If a path you construct "
+        "404s, do not assume it was moved/deleted/restricted — re-derive it from this exact value, or run "
+        "`find` on the parent directory, before telling the user it's missing or inaccessible.\n"
     )
     messages: list[dict[str, Any]] = (
         [{"role": "system", "content": base_prompt + execution_defaults + memory_block}] + hist[-history_load_limit:] + [user_msg]
