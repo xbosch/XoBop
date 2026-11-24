@@ -1,0 +1,18 @@
+{
+  "description": "Convert Fahrenheit temperature to Celsius.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "fahrenheit": {
+        "type": "number",
+        "description": "Temperature in Fahrenheit"
+      }
+    },
+    "required": [
+      "fahrenheit"
+    ]
+  },
+  "risk_level": "normal",
+  "requires_force": false,
+  "timeout_sec": 30
+}

@@ -1,0 +1,18 @@
+{
+  "description": "Returns a mock weather report for a given city. No real API calls\u2014output is randomly generated but plausible.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "city": {
+        "type": "string",
+        "description": "Name of the city to get the weather for"
+      }
+    },
+    "required": [
+      "city"
+    ]
+  },
+  "risk_level": "low",
+  "requires_force": false,
+  "timeout_sec": 30
+}

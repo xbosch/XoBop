@@ -1,5 +1,10 @@
 # XoBop V5
 
+> **Archived 2026-11-23.** No longer running (last active 2026-10-04). Its capabilities are now
+> covered by Claude Code with Gmail, Calendar and Chrome connectors. The code and its 215 tests
+> are kept for reference; the governed propose → simulate → promote loop and failure-conditioned
+> retrieval are the parts worth reusing. If revived, disable the nightly auto-promote job first.
+
 Owner-only Telegram execution agent with a governed self-improvement loop, browser automation, and Gmail/Calendar integration.
 
 ## What it does
